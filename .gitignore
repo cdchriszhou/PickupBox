@@ -1,0 +1,18 @@
+# Build outputs
+/build/
+/dist/
+*.o
+*.d
+.DS_Store
+**/._*
+*.swp
+*~
+
+# Xcode / IDE
+xcuserdata/
+*.xcworkspace
+.idea/
+.vscode/
+
+# Ad-hoc / local signing leftovers
+*.dSYM/

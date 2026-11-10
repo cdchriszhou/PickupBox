@@ -1,0 +1,34 @@
+#!/bin/bash
+# Force registration into Launch Services / Launchpad after install
+set -e
+
+APP="/Applications/拾音盒子.app"
+# Backward-compatible names from older builds
+if [[ ! -d "$APP" && -d "/Applications/SONY FH-KAOK.app" ]]; then
+  APP="/Applications/SONY FH-KAOK.app"
+fi
+if [[ ! -d "$APP" && -d "/Applications/SonyFHKAOK.app" ]]; then
+  APP="/Applications/SonyFHKAOK.app"
+fi
+if [[ ! -d "$APP" && -d "/Applications/PickupBox.app" ]]; then
+  APP="/Applications/PickupBox.app"
+fi
+
+if [[ -d "$APP" ]]; then
+  /usr/bin/chown -R root:admin "$APP" 2>/dev/null || true
+  /bin/chmod -R u+rwX,go+rX "$APP" 2>/dev/null || true
+  /bin/chmod +x "$APP/Contents/MacOS/"* 2>/dev/null || true
+  /usr/bin/xattr -cr "$APP" 2>/dev/null || true
+  /usr/bin/find "$APP" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
+  /usr/bin/touch "$APP"
+
+  LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+  if [[ -x "$LSREG" ]]; then
+    "$LSREG" -f "$APP" || true
+  fi
+
+  # Nudge Dock / Launchpad to rescan Applications
+  /usr/bin/killall Dock 2>/dev/null || true
+fi
+
+exit 0

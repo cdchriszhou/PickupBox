@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>拾音盒子</title>
+    <organization>com.kkfiles</organization>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <options customize="never" require-scripts="false" rootVolumeOnly="true" hostArchitectures="x86_64,arm64"/>
+    <!-- text/plain switches correctly with Installer's language popup; HTML often sticks to English root -->
+    <welcome file="Welcome.txt" mime-type="text/plain"/>
+    <readme file="ReadMe.txt" mime-type="text/plain"/>
+    <license file="License.txt" mime-type="text/plain"/>
+    <conclusion file="Conclusion.txt" mime-type="text/plain"/>
+    <pkg-ref id="com.kkfiles.PickupBox"/>
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.kkfiles.PickupBox"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="com.kkfiles.PickupBox" visible="false">
+        <pkg-ref id="com.kkfiles.PickupBox"/>
+    </choice>
+    <pkg-ref id="com.kkfiles.PickupBox" version="1.0.0" onConclusion="none">PickupBox-component.pkg</pkg-ref>
+</installer-gui-script>
