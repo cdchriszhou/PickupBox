@@ -16,7 +16,7 @@
 
 ## 下载安装包
 
-- **Windows**：发布后见 [Releases · windows-v1.0.0](https://github.com/cdchriszhou/PickupBox/releases/tag/windows-v1.0.0)（`拾音盒子-Setup-V1.0.0.exe`）
+- **Windows**：[PickupBox-Setup-Windows-V1.0.0.exe](https://github.com/cdchriszhou/PickupBox/releases/download/windows-v1.0.0/PickupBox-Setup-Windows-V1.0.0.exe) · [Release 说明](https://github.com/cdchriszhou/PickupBox/releases/tag/windows-v1.0.0)
 - **macOS**：待发布
 
 ## 开发指引
