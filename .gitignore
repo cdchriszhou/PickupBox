@@ -1,8 +1,41 @@
+# Build & deploy
+/build/
+/dist/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.obj
+*.o
+*_autogen/
+.qt/
+
+# Deployed Qt / FFmpeg runtime
+*.dll
+*.exe
+!installer/build_installer.bat
+generic/
+iconengines/
+imageformats/
+multimedia/
+networkinformation/
+platforms/
+styles/
+tls/
+
+# Installer staging & output (binaries live in GitHub Releases)
+installer/payload/
+installer/output/
+installer/*.exe
+
+# IDE / OS
 .DS_Store
 Thumbs.db
-*.swp
-*~
 .idea/
 .vscode/
 *.user
 *.user.*
+*.swp
+*~
+err.txt
+aqtinstall.log
