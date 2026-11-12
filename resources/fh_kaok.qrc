@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/">
+        <file>fh-kaok-icon.png</file>
+        <file>fh-kaok.ico</file>
+    </qresource>
+</RCC>
