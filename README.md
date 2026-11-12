@@ -11,15 +11,13 @@
 |---|---|
 | [`main`](https://github.com/cdchriszhou/PickupBox/tree/main) | 门户说明（本页） |
 | [`windows`](https://github.com/cdchriszhou/PickupBox/tree/windows) | Windows 版 Qt6 / C++ 源码与安装脚本 |
-| [`macos`](https://github.com/cdchriszhou/PickupBox/tree/macos) | macOS 版 AppKit / ObjC++ 源码与安装脚本 |
+| [`macos`](https://github.com/cdchriszhou/PickupBox/tree/macos) | macOS 版源码（待上传） |
 | [Releases](https://github.com/cdchriszhou/PickupBox/releases) | 各平台安装包 |
 
 ## 下载安装包
 
-- **Windows**：[PickupBox-Setup-Windows-V1.0.0.exe](https://github.com/cdchriszhou/PickupBox/releases/download/windows-v1.0.0/PickupBox-Setup-Windows-V1.0.0.exe) · [Release 说明](https://github.com/cdchriszhou/PickupBox/releases/tag/windows-v1.0.0)
-- **macOS**：[PickupBox-macOS-V1.0.0.dmg](https://github.com/cdchriszhou/PickupBox/releases/download/macos-v1.0.0/PickupBox-macOS-V1.0.0.dmg) · [PKG](https://github.com/cdchriszhou/PickupBox/releases/download/macos-v1.0.0/PickupBox-macOS-V1.0.0.pkg) · [语言安装器 ZIP](https://github.com/cdchriszhou/PickupBox/releases/download/macos-v1.0.0/PickupBox-Install-macOS-V1.0.0.zip) · [Release 说明](https://github.com/cdchriszhou/PickupBox/releases/tag/macos-v1.0.0)
-
-macOS 推荐：下载 DMG 后打开 **「拾音盒子 Install.app」**（先选语言再安装），或将 App 拖入 Applications。
+- **Windows**：[PickupBox-Setup-Windows-V1.1.0.exe](https://github.com/cdchriszhou/PickupBox/releases/download/windows-v1.1.0/PickupBox-Setup-Windows-V1.1.0.exe) · [Release 说明](https://github.com/cdchriszhou/PickupBox/releases/tag/windows-v1.1.0)
+- **macOS**：待发布
 
 ## 开发指引
 
@@ -44,18 +42,9 @@ build_installer.bat
 
 ```bash
 git clone -b macos https://github.com/cdchriszhou/PickupBox.git
-cd PickupBox
-make
-open build/PickupBox.app
 ```
 
-生成安装包：
-
-```bash
-make dist
-```
-
-依赖：Xcode Command Line Tools（`clang++`、AppKit）。
+（工程与构建说明随 `macos` 分支一并提供。）
 
 ## 发版约定
 
