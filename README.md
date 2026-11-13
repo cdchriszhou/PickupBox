@@ -16,7 +16,7 @@
 
 ## 下载安装包
 
-- **Windows**：[PickupBox-Setup-Windows-V1.1.0.exe](https://github.com/cdchriszhou/PickupBox/releases/download/windows-v1.1.0/PickupBox-Setup-Windows-V1.1.0.exe) · [Release 说明](https://github.com/cdchriszhou/PickupBox/releases/tag/windows-v1.1.0)
+- **Windows**：[PickupBox-Setup-Windows-V1.2.0.exe](https://github.com/cdchriszhou/PickupBox/releases/download/windows-v1.2.0/PickupBox-Setup-Windows-V1.2.0.exe) · [Release 说明](https://github.com/cdchriszhou/PickupBox/releases/tag/windows-v1.2.0)
 - **macOS**：待发布
 
 ## 开发指引
