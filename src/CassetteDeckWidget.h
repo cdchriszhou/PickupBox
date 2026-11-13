@@ -106,6 +106,7 @@ private:
     void drawAmpModule(QPainter &p, const QRectF &rect);
     void drawVerticalFader(QPainter &p, const QRectF &track, float value,
                            const QString &label, const QString &key, bool bipolar = false);
+    void drawNeedleMeter(QPainter &p, const QRectF &rect, float level, const QString &tag);
     void drawRadioModule(QPainter &p, const QRectF &rect);
     void drawRadioPowerSwitch(QPainter &p, const QRectF &rect);
     void drawTapeModule(QPainter &p, const QRectF &rect);
@@ -141,6 +142,8 @@ private:
 
     float m_left = 0;
     float m_right = 0;
+    float m_needleL = 0; // 指针式功率/VU 表，带惯性
+    float m_needleR = 0;
     QVector<float> m_wave;
     QVector<float> m_bands;
     QVector<float> m_peaks;
@@ -167,6 +170,18 @@ private:
     bool m_stereoWide = false;
     bool m_dynBoost = false;
     bool m_peakHold = true;
+    bool m_hpf = false;
+    bool m_lpf = false;
+    bool m_mono = false;
+    bool m_spkA = true;
+    bool m_spkB = false;
+    bool m_direct = false;     // TONE DIRECT：旁路均衡
+    bool m_pureAudio = false;  // PURE AUDIO：极简听音
+    bool m_eqStoreArmed = false;
+    float m_presence = 0.50f;
+    float m_eqMemA[4] = {0.55f, 0.50f, 0.50f, 0.50f}; // bass mid treble balance
+    float m_eqMemB[4] = {0.42f, 0.58f, 0.55f, 0.50f};
+    char m_eqBank = 'A';
     UiTheme m_theme = UiTheme::make(UiTheme::Id::ClassicAmber);
     int m_sleepPresetMin = 0;   // 0=关, 15/30/60/90
     int m_sleepRemainSec = 0;

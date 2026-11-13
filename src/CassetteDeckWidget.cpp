@@ -224,7 +224,7 @@ void CassetteDeckWidget::updateBands()
             w = qAbs(m_wave[idx]);
         }
         // 中高频自然衰减，低频略强 —— 更像真实频谱
-        const float rollOff = 1.f - 0.55f * t;
+        float rollOff = 1.f - 0.55f * t;
         const float bassShape = qExp(-((t - 0.10f) * (t - 0.10f)) / 0.07f);
         const float midShape = qExp(-((t - 0.45f) * (t - 0.45f)) / 0.12f);
         const float trebleShape = qExp(-((t - 0.82f) * (t - 0.82f)) / 0.08f);
@@ -239,9 +239,31 @@ void CassetteDeckWidget::updateBands()
         }
         if (m_dolby)
             trebleW *= 0.72f; // 杜比降噪：压一点毛刺高频
+        // Presence：抬中上盘；HPF/LPF 切边
+        const float presenceW = 0.85f + 0.45f * m_presence;
+        midW *= presenceW;
+        trebleW *= (0.90f + 0.25f * m_presence);
+        if (m_hpf)
+            bassW *= 0.45f;
+        if (m_lpf)
+            trebleW *= 0.48f;
+        if (m_mono)
+            rollOff = 1.f - 0.35f * t;
+        if (m_direct) {
+            // TONE DIRECT：旁路三段均衡与 Presence
+            bassW = midW = trebleW = 0.28f;
+        }
+        if (m_pureAudio) {
+            midW *= 0.92f;
+            trebleW *= 0.88f;
+        }
 
         float target = w * 0.85f * rollOff
             + energy * (midW * midShape + bassW * bassShape + trebleW * trebleShape);
+        if (!m_spkA && !m_spkB)
+            target *= 0.08f;
+        else if (!m_spkA || !m_spkB)
+            target *= 0.82f;
         // 软压缩：越接近满幅越难再往上顶
         target = PaintKit::clamp01(target);
         target = target / (1.f + 1.2f * target);
@@ -258,6 +280,37 @@ void CassetteDeckWidget::tick()
     bool need = false;
     const float energy = qMax(m_left, m_right);
     m_vizPulse = energy > m_vizPulse ? energy : m_vizPulse * 0.90f;
+
+    // 指针表：放大驱动 + 快上冲慢回落，摆幅更明显
+    auto ballistics = [](float cur, float target) {
+        return target > cur ? (cur * 0.28f + target * 0.72f) : (cur * 0.82f + target * 0.18f);
+    };
+    auto driveNeedle = [](float raw) {
+        // 抬灵敏度：小声也有行程，大声顶到红区
+        float x = PaintKit::clamp01(raw * 2.6f + 0.08f);
+        x = std::sqrt(x); // 低电平更夸张
+        return PaintKit::clamp01(x);
+    };
+    float peakKick = 0.f;
+    for (float b : m_bands)
+        peakKick = qMax(peakKick, b);
+    float tgtL = driveNeedle((m_left * 0.75f + peakKick * 0.35f)
+                             * (m_stereoWide ? 1.1f : 1.f) * (m_mute ? 0.f : 1.f));
+    float tgtR = driveNeedle((m_right * 0.75f + peakKick * 0.35f)
+                             * (m_stereoWide ? 1.1f : 1.f) * (m_mute ? 0.f : 1.f));
+    if (m_mono)
+        tgtL = tgtR = (tgtL + tgtR) * 0.5f;
+    if (!m_spkA)
+        tgtL *= 0.12f;
+    if (!m_spkB)
+        tgtR *= 0.12f;
+    const float nL = ballistics(m_needleL, tgtL);
+    const float nR = ballistics(m_needleR, tgtR);
+    if (qAbs(nL - m_needleL) > 0.001f || qAbs(nR - m_needleR) > 0.001f)
+        need = true;
+    m_needleL = nL;
+    m_needleR = nR;
+
     if (m_playing) {
         m_reelAngle = std::fmod(m_reelAngle + 2.4f + 9.f * energy, 360.f);
         need = true;
@@ -875,7 +928,7 @@ void CassetteDeckWidget::drawStack(QPainter &p, const QRectF &stack)
     const qreal y4 = y5 - cdH;
     const qreal tapeMin = qBound(120.0, h * 0.28, 220.0);
     qreal dispH = qBound(92.0, h * 0.15, 140.0);      // VFD 3-line readout
-    qreal ampH = qBound(148.0, h * 0.24, 204.0);     // amp: 预设 + 数字读数 + 扩展开关
+    qreal ampH = qBound(186.0, h * 0.30, 248.0);     // Onkyo 风格：双排键 + SOURCE + MEM
     qreal radioH = qBound(96.0, h * 0.16, 140.0);
     qreal y1 = y0 + dispH;
     qreal y2 = y1 + ampH;
@@ -1103,37 +1156,153 @@ void CassetteDeckWidget::drawVfd(QPainter &p, const QRectF &rect)
 void CassetteDeckWidget::drawVerticalFader(QPainter &p, const QRectF &track, float value,
                                           const QString &label, const QString &key, bool bipolar)
 {
-    PaintKit::fillBeveledRect(p, track, QColor(10, 10, 12), 1.5, 2, false);
-    // Scale ticks
-    p.setPen(QPen(QColor(70, 70, 74), 1));
+    const UiTheme &th = m_theme;
+    // 凹槽机架
+    PaintKit::fillBeveledRect(p, track.adjusted(-3, -2, 3, 2), th.chassisMid, 1.8, 2.5, true);
+    PaintKit::fillBeveledRect(p, track, th.ampWell, 1.2, 2.2, false);
+    // 槽内金属导轨
+    const QRectF slot = track.adjusted(track.width() * 0.32, 2, -track.width() * 0.32, -2);
+    QLinearGradient slotG(slot.topLeft(), slot.topRight());
+    slotG.setColorAt(0.0, QColor(0, 0, 0, 160));
+    slotG.setColorAt(0.5, QColor(70, 70, 76));
+    slotG.setColorAt(1.0, QColor(0, 0, 0, 160));
+    p.fillRect(slot, slotG);
+
+    // 丝印刻度（+ / 0 / -）
+    p.setPen(QPen(th.labelDim, 1));
+    const char *const marks[] = {"+", "", "0", "", "-"};
     for (int i = 0; i <= 4; ++i) {
         const qreal y = track.top() + track.height() * i / 4.0;
-        p.drawLine(QPointF(track.left() + 2, y), QPointF(track.left() + 5, y));
-        p.drawLine(QPointF(track.right() - 5, y), QPointF(track.right() - 2, y));
+        p.drawLine(QPointF(track.left() + 1, y), QPointF(track.left() + 4, y));
+        p.drawLine(QPointF(track.right() - 4, y), QPointF(track.right() - 1, y));
+        if (marks[i][0]) {
+            PaintKit::drawLabel(p, QRectF(track.right() + 1, y - 4, 10, 8),
+                                QString::fromLatin1(marks[i]), 5, true, th.labelDim,
+                                Qt::AlignLeft | Qt::AlignVCenter);
+        }
     }
     if (bipolar) {
         const qreal midY = track.center().y();
-        p.setPen(QPen(QColor(120, 90, 40), 1));
+        p.setPen(QPen(th.accent, 1.2));
         p.drawLine(QPointF(track.left() + 1, midY), QPointF(track.right() - 1, midY));
     }
 
     const float v = PaintKit::clamp01(value);
     const qreal y = track.bottom() - v * track.height();
-    const QRectF cap(track.center().x() - track.width() * 0.42, y - 5, track.width() * 0.84, 10);
+    const QRectF cap(track.center().x() - track.width() * 0.55, y - 6, track.width() * 1.1, 12);
     QLinearGradient g(cap.topLeft(), cap.bottomLeft());
-    g.setColorAt(0.0, QColor(210, 210, 216));
-    g.setColorAt(0.45, QColor(120, 120, 128));
-    g.setColorAt(1.0, QColor(48, 48, 54));
+    g.setColorAt(0.0, QColor(230, 230, 236));
+    g.setColorAt(0.35, QColor(160, 160, 168));
+    g.setColorAt(0.55, QColor(90, 90, 98));
+    g.setColorAt(1.0, QColor(40, 40, 46));
     p.setBrush(g);
-    p.setPen(QPen(QColor(30, 30, 34), 1));
-    p.drawRoundedRect(cap, 2, 2);
-    p.setPen(QPen(QColor(255, 60, 40), 1.4));
-    p.drawLine(QPointF(cap.left() + 2, cap.center().y()), QPointF(cap.right() - 2, cap.center().y()));
+    p.setPen(QPen(QColor(20, 20, 24), 1));
+    p.drawRoundedRect(cap, 2.5, 2.5);
+    // 推子帽中线 + 螺钉
+    p.setPen(QPen(th.ledDanger, 1.5));
+    p.drawLine(QPointF(cap.left() + 3, cap.center().y()), QPointF(cap.right() - 3, cap.center().y()));
+    PaintKit::drawScrew(p, cap.center(), 1.6);
 
-    PaintKit::drawLabel(p, QRectF(track.left() - 6, track.bottom() + 2, track.width() + 12, 11),
-                        label, 5, true, QColor(170, 170, 174));
+    PaintKit::drawLabel(p, QRectF(track.left() - 8, track.bottom() + 2, track.width() + 16, 11),
+                        label, 5, true, th.label);
     m_sliderTracks[key] = track;
-    m_hit[key] = track.adjusted(-4, -6, 4, 14);
+    m_hit[key] = track.adjusted(-6, -8, 8, 14);
+}
+
+void CassetteDeckWidget::drawNeedleMeter(QPainter &p, const QRectF &rect, float level, const QString &tag)
+{
+    // 指针式 VU/功率表：全部绘制限制在表窗内，避免溢出
+    const UiTheme &th = m_theme;
+    PaintKit::fillBeveledRect(p, rect, th.ampWell, 2.0, 2.8, false);
+    const QRectF face = rect.adjusted(4, 4, -4, -12);
+
+    p.save();
+    p.setClipRect(face.adjusted(0.5, 0.5, -0.5, -0.5));
+
+    QLinearGradient glass(face.topLeft(), face.bottomLeft());
+    glass.setColorAt(0.0, QColor(245, 240, 220, 30));
+    glass.setColorAt(0.55, QColor(28, 26, 22, 50));
+    glass.setColorAt(1.0, QColor(8, 8, 10, 90));
+    p.fillRect(face, glass);
+
+    // 轴心放在表窗内底部，半径按窗体收紧，尖端不会越界
+    const QPointF pivot(face.center().x(), face.bottom() - 5);
+    const qreal a0 = -135.0;
+    const qreal a1 = -45.0;
+    const qreal tipPad = 3.0;
+    const qreal maxByH = pivot.y() - face.top() - tipPad;
+    const qreal maxByW = qMin(pivot.x() - face.left(), face.right() - pivot.x()) / 0.72 - tipPad;
+    const qreal radius = qMax(10.0, qMin(qMin(face.width() * 0.55, face.height() * 0.82),
+                                         qMin(maxByH, maxByW)));
+
+    auto polar = [&](qreal deg, qreal r) {
+        const qreal rad = qDegreesToRadians(deg);
+        return QPointF(pivot.x() + qCos(rad) * r, pivot.y() + qSin(rad) * r);
+    };
+
+    // 刻度弧（仅细线，不画大扇形）
+    QPainterPath arc;
+    arc.moveTo(polar(a0, radius * 0.92));
+    for (int i = 1; i <= 20; ++i) {
+        const qreal t = qreal(i) / 20.0;
+        arc.lineTo(polar(a0 + (a1 - a0) * t, radius * 0.92));
+    }
+    p.setPen(QPen(QColor(th.labelDim.red(), th.labelDim.green(), th.labelDim.blue(), 110), 1.1));
+    p.setBrush(Qt::NoBrush);
+    p.drawPath(arc);
+
+    // 红区：只画外圈弧段，不填扇形
+    QPainterPath redArc;
+    redArc.moveTo(polar(a0 + (a1 - a0) * 0.72, radius * 0.92));
+    for (int i = 1; i <= 10; ++i) {
+        const qreal t = 0.72 + 0.28 * (qreal(i) / 10.0);
+        redArc.lineTo(polar(a0 + (a1 - a0) * t, radius * 0.92));
+    }
+    p.setPen(QPen(QColor(210, 55, 40, 180), 2.2));
+    p.drawPath(redArc);
+
+    const struct { qreal t; const char *lab; bool red; } ticks[] = {
+        {0.00, "-20", false}, {0.25, "-10", false}, {0.50, "-5", false},
+        {0.72, "0", true}, {1.00, "+3", true}};
+    for (const auto &tk : ticks) {
+        const qreal deg = a0 + (a1 - a0) * tk.t;
+        const QColor c = tk.red ? QColor(210, 55, 40) : th.labelDim;
+        p.setPen(QPen(c, tk.red ? 1.3 : 1.0));
+        p.drawLine(polar(deg, radius * 0.78), polar(deg, radius * 0.92));
+        const QPointF lp = polar(deg, radius * 0.62);
+        PaintKit::drawLabel(p, QRectF(lp.x() - 9, lp.y() - 4, 18, 8),
+                            QString::fromLatin1(tk.lab), 4, true, c);
+    }
+
+    // 指针：长度留边，尖端不穿出表窗
+    const float vu = PaintKit::clamp01(level);
+    const qreal deg = a0 + (a1 - a0) * vu;
+    const QPointF tip = polar(deg, radius * 0.90);
+    const QPointF mid = polar(deg, radius * 0.45);
+    p.setPen(QPen(QColor(18, 16, 14), 2.4, Qt::SolidLine, Qt::RoundCap));
+    p.drawLine(pivot, tip);
+    p.setPen(QPen(QColor(220, 45, 35), 1.4, Qt::SolidLine, Qt::RoundCap));
+    p.drawLine(mid, tip);
+    p.setBrush(QColor(220, 45, 35));
+    p.setPen(Qt::NoPen);
+    p.drawEllipse(tip, 1.8, 1.8);
+
+    QRadialGradient hub(pivot, 3.2);
+    hub.setColorAt(0.0, QColor(200, 200, 205));
+    hub.setColorAt(1.0, QColor(40, 40, 44));
+    p.setBrush(hub);
+    p.setPen(QPen(QColor(20, 20, 22), 0.7));
+    p.drawEllipse(pivot, 2.8, 2.8);
+
+    QLinearGradient gloss(face.topLeft(), face.topRight());
+    gloss.setColorAt(0.0, QColor(255, 255, 255, 28));
+    gloss.setColorAt(0.5, QColor(255, 255, 255, 0));
+    gloss.setColorAt(1.0, QColor(255, 255, 255, 14));
+    p.fillRect(face, gloss);
+    p.restore();
+
+    PaintKit::drawLabel(p, QRectF(rect.left(), rect.bottom() - 10, rect.width(), 9),
+                        tag, 5, true, th.labelDim);
 }
 
 void CassetteDeckWidget::drawAmpModule(QPainter &p, const QRectF &rect)
@@ -1142,99 +1311,181 @@ void CassetteDeckWidget::drawAmpModule(QPainter &p, const QRectF &rect)
     p.setClipRect(rect);
     m_sliderTracks.clear();
     const UiTheme &th = m_theme;
-    const QRectF face = rect.adjusted(6, 4, -6, -4);
-    PaintKit::fillBeveledRect(p, face, th.ampFace, 2.8, 4.0, true);
-    p.setOpacity(0.30);
-    p.drawPixmap(face.toRect(), PaintKit::plasticNoise(int(face.width()), int(face.height()), 33, 9));
-    p.setOpacity(0.16);
+    const QRectF face = rect.adjusted(5, 3, -5, -3);
+    PaintKit::fillBeveledRect(p, face, th.ampFace, 3.0, 4.5, true);
+    p.setOpacity(0.28);
+    p.drawPixmap(face.toRect(), PaintKit::plasticNoise(int(face.width()), int(face.height()), 33, 10));
+    p.setOpacity(0.22);
     p.drawPixmap(face.toRect(), PaintKit::brushedMetal(int(face.width()), int(face.height()), 11));
     p.setOpacity(1.0);
     PaintKit::paintWornOverlay(p, face, 23);
 
-    // 面板顶栏：标题 + 数字读数
-    const qreal hdrH = 16.0;
-    PaintKit::drawLabel(p, QRectF(face.left() + 10, face.top() + 2, 88, hdrH - 2),
-                        QStringLiteral("AMP  CONTROL"), 6, true, th.labelDim,
+    // 四角固定螺钉
+    for (const QPointF &pt : {
+             QPointF(face.left() + 8, face.top() + 7), QPointF(face.right() - 8, face.top() + 7),
+             QPointF(face.left() + 8, face.bottom() - 8), QPointF(face.right() - 8, face.bottom() - 8)})
+        PaintKit::drawScrew(p, pt, 2.4);
+
+    // —— 顶栏：安桥风铭牌 + FL 显示窗 ——
+    const qreal hdrH = 20.0;
+    PaintKit::drawLabel(p, QRectF(face.left() + 16, face.top() + 2, 78, hdrH - 2),
+                        QStringLiteral("ONKYO-STYLE"), 5, true, th.plateGold,
                         Qt::AlignLeft | Qt::AlignVCenter, 0.7);
-    const QRectF digi(face.right() - 168, face.top() + 2, 156, hdrH - 1);
-    PaintKit::fillBeveledRect(p, digi, th.ampWell, 1.5, 2, false);
+    PaintKit::drawLabel(p, QRectF(face.left() + 16, face.top() + 11, 78, 9),
+                        QStringLiteral("INTEGRATED STEREO AMP"), 4, true, th.labelDim,
+                        Qt::AlignLeft | Qt::AlignVCenter, 0.4);
+    const QRectF digi(face.left() + 100, face.top() + 2, face.width() - 116, hdrH - 1);
+    PaintKit::fillBeveledRect(p, digi, th.ampWell, 1.6, 2.4, false);
     {
+        const int glowA = m_pureAudio ? 12 : 40;
         QLinearGradient digiG(digi.topLeft(), digi.bottomLeft());
-        digiG.setColorAt(0.0, QColor(th.vfdGlow.red(), th.vfdGlow.green(), th.vfdGlow.blue(), 28));
+        digiG.setColorAt(0.0, QColor(th.vfdGlow.red(), th.vfdGlow.green(), th.vfdGlow.blue(), glowA));
         digiG.setColorAt(1.0, Qt::transparent);
         p.fillRect(digi.adjusted(1, 1, -1, -1), digiG);
+        p.setPen(QPen(QColor(th.vfdGlow.red(), th.vfdGlow.green(), th.vfdGlow.blue(), 16), 1));
+        for (qreal x = digi.left() + 3; x < digi.right() - 3; x += 3)
+            p.drawLine(QPointF(x, digi.top() + 2), QPointF(x, digi.bottom() - 2));
         const int volDb = m_mute ? -99 : int(std::round(-48.0 + 48.0 * m_volume));
-        const QString digiText = QStringLiteral("%1  %2dB  %3")
+        QStringList flags;
+        if (m_direct) flags << QStringLiteral("DIRECT");
+        if (m_pureAudio) flags << QStringLiteral("PURE");
+        if (m_dolby) flags << QStringLiteral("NR");
+        if (m_loudness) flags << QStringLiteral("LOUD");
+        if (m_megaBass) flags << QStringLiteral("S.BASS");
+        if (m_mono) flags << QStringLiteral("MONO");
+        if (m_eqStoreArmed) flags << QStringLiteral("STORE");
+        const QString digiText = QStringLiteral("%1   %2dB   EQ:%3   MEM-%4   SP:%5%6   %7")
                                      .arg(m_sourceMode)
                                      .arg(volDb, 3)
-                                     .arg(m_preset.isEmpty() ? QStringLiteral("USER") : m_preset);
-        PaintKit::drawLabel(p, digi.adjusted(4, 0, -4, 0), digiText, 7, true, th.vfdGlow,
-                            Qt::AlignCenter, 0.5);
+                                     .arg(m_preset.isEmpty() ? QStringLiteral("USER") : m_preset)
+                                     .arg(QChar(m_eqBank))
+                                     .arg(m_spkA ? QStringLiteral("A") : QStringLiteral("-"))
+                                     .arg(m_spkB ? QStringLiteral("B") : QStringLiteral("-"))
+                                     .arg(flags.join(QLatin1Char(' ')));
+        PaintKit::drawLabel(p, digi.adjusted(6, 0, -6, 0), digiText, 6, true,
+                            m_pureAudio ? th.labelDim : th.vfdGlow,
+                            Qt::AlignLeft | Qt::AlignVCenter, 0.35);
     }
 
-    // —— 上排：音效预设 ——
-    const qreal topH = qBound(22.0, face.height() * 0.17, 28.0);
+    // —— SPEAKERS + SOURCE（安桥经典上排）——
+    const qreal srcH = 18.0;
+    const QRectF srcRow(face.left() + 12, face.top() + hdrH + 2, face.width() - 24, srcH);
+    flatKey(p, QRectF(srcRow.left(), srcRow.top(), 34, srcH), QStringLiteral("SP-A"),
+            QStringLiteral("amp:spka"), m_spkA, true);
+    flatKey(p, QRectF(srcRow.left() + 36, srcRow.top(), 34, srcH), QStringLiteral("SP-B"),
+            QStringLiteral("amp:spkb"), m_spkB, true);
+    PaintKit::drawLabel(p, QRectF(srcRow.left() + 74, srcRow.top(), 40, srcH),
+                        QStringLiteral("SOURCE"), 5, true, th.labelDim,
+                        Qt::AlignLeft | Qt::AlignVCenter, 0.5);
+    const QStringList sources = {
+        QStringLiteral("PHONO"), QStringLiteral("CD"), QStringLiteral("TAPE"),
+        QStringLiteral("FM"), QStringLiteral("AUX"), QStringLiteral("DVD")};
+    const qreal srcLeft = srcRow.left() + 116;
+    const qreal srcSlot = (srcRow.right() - srcLeft) / sources.size();
+    for (int i = 0; i < sources.size(); ++i) {
+        const bool on = (sources[i] == m_sourceMode);
+        const QRectF chip(srcLeft + i * srcSlot + 1, srcRow.top(), srcSlot - 2, srcH);
+        flatKey(p, chip, sources[i], QStringLiteral("amp:src:%1").arg(sources[i]), on, true);
+    }
+
+    // —— 功能键两排（避免单排挤扁文字）——
+    const qreal swH = qBound(17.0, face.height() * 0.085, 20.0);
+    const qreal swY0 = srcRow.bottom() + 3;
+    const QStringList row1Labs = {
+        QStringLiteral("MUTING"), QStringLiteral("LOUDNESS"), QStringLiteral("DIRECT"),
+        QStringLiteral("PURE"), QStringLiteral("S.BASS"), QStringLiteral("DOLBY"),
+        QStringLiteral("STEREO")};
+    const QStringList row1Keys = {
+        QStringLiteral("amp:mute"), QStringLiteral("amp:loudness"), QStringLiteral("amp:direct"),
+        QStringLiteral("amp:pure"), QStringLiteral("amp:megabass"), QStringLiteral("amp:dolby"),
+        QStringLiteral("amp:mono")};
+    // STEREO lit when NOT mono
+    const bool row1Lit[] = {
+        m_mute, m_loudness, m_direct, m_pureAudio, m_megaBass, m_dolby, !m_mono};
+    const int n1 = row1Labs.size();
+    const qreal g1 = 3.0;
+    const qreal w1 = (face.width() - 24 - g1 * (n1 - 1)) / n1;
+    for (int i = 0; i < n1; ++i) {
+        flatKey(p, QRectF(face.left() + 12 + i * (w1 + g1), swY0, w1, swH),
+                row1Labs[i], row1Keys[i], row1Lit[i], true);
+    }
+
+    const qreal swY1 = swY0 + swH + 3;
+    const QStringList row2Labs = {
+        QStringLiteral("SURROUND"), QStringLiteral("WIDE"), QStringLiteral("BOOST"),
+        QStringLiteral("HPF"), QStringLiteral("LPF"), QStringLiteral("PEAK"),
+        vizModeLabel(), sleepStatusText()};
+    const QStringList row2Keys = {
+        QStringLiteral("amp:surround"), QStringLiteral("amp:wide"), QStringLiteral("amp:boost"),
+        QStringLiteral("amp:hpf"), QStringLiteral("amp:lpf"), QStringLiteral("amp:peak"),
+        QStringLiteral("amp:viz"), QStringLiteral("amp:sleep")};
+    const bool row2Lit[] = {
+        m_surround, m_stereoWide, m_dynBoost, m_hpf, m_lpf, m_peakHold, true, m_sleepPresetMin > 0};
+    const int n2 = row2Labs.size();
+    const qreal g2 = 3.0;
+    const qreal w2 = (face.width() - 24 - g2 * (n2 - 1)) / n2;
+    for (int i = 0; i < n2; ++i) {
+        flatKey(p, QRectF(face.left() + 12 + i * (w2 + g2), swY1, w2, swH),
+                row2Labs[i], row2Keys[i], row2Lit[i], true);
+    }
+
+    // —— PRESET + MEMORY（加宽，避免 STO 被裁）——
+    const qreal topH = qBound(22.0, face.height() * 0.11, 28.0);
     const QStringList presets = {
         QStringLiteral("ROCK"), QStringLiteral("POPS"), QStringLiteral("CLASSIC"),
         QStringLiteral("JAZZ"), QStringLiteral("DISCO"), QStringLiteral("FLAT"),
         QStringLiteral("VOCAL")};
-    const QRectF presetRow(face.left() + 8, face.top() + hdrH + 1, face.width() - 16, topH - 1);
-    PaintKit::drawLabel(p, QRectF(presetRow.left(), presetRow.top(), 48, 8),
-                        QStringLiteral("EQ PRESET"), 5, true, th.labelDim,
-                        Qt::AlignLeft | Qt::AlignVCenter, 0.6);
-    const qreal slot = (presetRow.width() - 4) / presets.size();
+    const QRectF presetRow(face.left() + 12, swY1 + swH + 3, face.width() - 24, topH);
+    PaintKit::drawLabel(p, QRectF(presetRow.left(), presetRow.top(), 40, 8),
+                        QStringLiteral("PRESET"), 5, true, th.labelDim,
+                        Qt::AlignLeft | Qt::AlignVCenter, 0.5);
+    const qreal memW = 118;
+    const qreal presetW = presetRow.width() - memW - 8;
+    const qreal slot = presetW / presets.size();
     for (int i = 0; i < presets.size(); ++i) {
         const qreal cx = presetRow.left() + (i + 0.5) * slot;
         const bool on = (m_preset == presets[i]);
-        const QRectF chip(cx - slot * 0.42, presetRow.top() + 8, slot * 0.84, presetRow.height() - 10);
+        const QRectF chip(cx - slot * 0.42, presetRow.top() + 8, slot * 0.84, presetRow.height() - 9);
         if (on) {
             p.setPen(QPen(th.accent, 1.0));
-            p.setBrush(QColor(th.accent.red(), th.accent.green(), th.accent.blue(), 35));
+            p.setBrush(QColor(th.accent.red(), th.accent.green(), th.accent.blue(), 40));
             p.drawRoundedRect(chip, 2, 2);
         }
-        PaintKit::drawLabel(p, chip, QStringLiteral("%1").arg(presets[i]),
-                            5, true, on ? th.labelHot : th.label);
-        PaintKit::drawLed(p, QPointF(cx, presetRow.top() + 5), on, th.ledWarm, 1.7);
-        m_hit[QStringLiteral("preset:%1").arg(presets[i])] = chip.adjusted(-2, -6, 2, 2);
+        PaintKit::drawLabel(p, chip, presets[i], 5, true, on ? th.labelHot : th.label);
+        PaintKit::drawLed(p, QPointF(cx, presetRow.top() + 5), on, th.ledWarm, 1.55);
+        m_hit[QStringLiteral("preset:%1").arg(presets[i])] = chip.adjusted(-1, -6, 1, 1);
+    }
+    {
+        const qreal mx = presetRow.right() - memW;
+        const qreal mh = topH - 6;
+        const qreal my = presetRow.top() + 5;
+        flatKey(p, QRectF(mx, my, 38, mh), QStringLiteral("STORE"),
+                QStringLiteral("amp:store"), m_eqStoreArmed, true);
+        flatKey(p, QRectF(mx + 40, my, 36, mh), QStringLiteral("MEM1"),
+                QStringLiteral("amp:eqa"), m_eqBank == 'A', true);
+        flatKey(p, QRectF(mx + 78, my, 36, mh), QStringLiteral("MEM2"),
+                QStringLiteral("amp:eqb"), m_eqBank == 'B', true);
     }
 
-    // —— 中排：功能键分三组（FX / CTRL / SYS）——
-    const qreal swH = qBound(17.0, face.height() * 0.13, 22.0);
-    const qreal swY = presetRow.bottom() + 2;
-    const QStringList swLabs = {
-        QStringLiteral("DOLBY"), QStringLiteral("MEGA"), QStringLiteral("LOUD"),
-        QStringLiteral("MUTE"), QStringLiteral("SURR"), QStringLiteral("WIDE"),
-        QStringLiteral("BOOST"), QStringLiteral("PEAK"), vizModeLabel(), sleepStatusText()};
-    const QStringList swKeys = {
-        QStringLiteral("amp:dolby"), QStringLiteral("amp:megabass"), QStringLiteral("amp:loudness"),
-        QStringLiteral("amp:mute"), QStringLiteral("amp:surround"), QStringLiteral("amp:wide"),
-        QStringLiteral("amp:boost"), QStringLiteral("amp:peak"), QStringLiteral("amp:viz"),
-        QStringLiteral("amp:sleep")};
-    const bool swLit[] = {
-        m_dolby, m_megaBass, m_loudness, m_mute, m_surround, m_stereoWide,
-        m_dynBoost, m_peakHold, true, m_sleepPresetMin > 0};
-    const int swN = swLabs.size();
-    const qreal swGap = 2.5;
-    const qreal swW = (face.width() - 16 - swGap * (swN - 1)) / swN;
-    for (int i = 0; i < swN; ++i) {
-        flatKey(p, QRectF(face.left() + 8 + i * (swW + swGap), swY, swW, swH - 1),
-                swLabs[i], swKeys[i], swLit[i], true);
-    }
+    // 分隔丝印线
+    const qreal sepY = presetRow.bottom() + 3;
+    p.setPen(QPen(QColor(th.accent.red(), th.accent.green(), th.accent.blue(), 70), 1));
+    p.drawLine(QPointF(face.left() + 12, sepY), QPointF(face.right() - 12, sepY));
 
-    // —— 下排：EQ 推子 | 灯柱 | 频谱 | 峰值 | 旋钮 ——
+    // —— 下排：推子 / 灯柱 / 频谱 / 分段 VU / 旋钮井 ——
     const qreal captionH = 11.0;
-    const QRectF body(face.left() + 8, swY + swH + 2,
-                      face.width() - 16, face.bottom() - captionH - 2 - (swY + swH + 2));
-    if (body.height() < 26) {
+    const QRectF body(face.left() + 14, sepY + 3,
+                      face.width() - 28, face.bottom() - captionH - 3 - (sepY + 3));
+    if (body.height() < 28) {
         p.restore();
         return;
     }
 
-    const qreal faderW = 13;
-    const qreal faderGap = 10;
-    const qreal faderH = qMax(24.0, body.height() - 12);
+    const qreal faderW = 12;
+    const qreal faderGap = 11;
+    const qreal faderH = qMax(28.0, body.height() - 12);
     const qreal faderTop = body.top() + 1;
-    qreal fx = body.left() + 2;
+    qreal fx = body.left();
     drawVerticalFader(p, QRectF(fx, faderTop, faderW, faderH), m_bass,
                        QStringLiteral("BASS"), QStringLiteral("amp:bass"));
     fx += faderW + faderGap;
@@ -1246,84 +1497,109 @@ void CassetteDeckWidget::drawAmpModule(QPainter &p, const QRectF &rect)
     fx += faderW + faderGap;
     drawVerticalFader(p, QRectF(fx, faderTop, faderW, faderH), m_balance,
                        QStringLiteral("BAL"), QStringLiteral("amp:balance"), true);
-    fx += faderW + faderGap + 3;
+    fx += faderW + faderGap + 4;
 
-    // DBFB 灯柱
-    const QRectF db(fx, faderTop, 8, faderH);
+    // 分段 DBFB 灯柱
+    const QRectF db(fx, faderTop, 10, faderH);
     PaintKit::fillBeveledRect(p, db, th.ampWell, 1, 2, false);
-    if (m_megaBass || m_dynBoost) {
-        QLinearGradient g(db.bottomLeft(), db.topLeft());
-        g.setColorAt(0.0, th.ledDanger.darker(140));
-        g.setColorAt(0.55, th.accentHot);
-        g.setColorAt(1.0, th.vfdGlow);
-        p.fillRect(db.adjusted(1.2, 1.2, -1.2, -1.2), g);
+    {
+        const int segs = qMax(8, int(db.height() / 4));
+        const float fill = (m_megaBass || m_dynBoost)
+                               ? PaintKit::clamp01(0.55f + 0.45f * qMax(m_left, m_right))
+                               : PaintKit::clamp01(0.12f + 0.25f * qMax(m_left, m_right));
+        for (int i = 0; i < segs; ++i) {
+            const float t = float(i) / float(segs - 1);
+            const bool on = t <= fill;
+            QColor c = th.ledCool.darker(130);
+            if (t > 0.55f)
+                c = th.accentHot;
+            if (t > 0.82f)
+                c = th.ledDanger;
+            if (!on)
+                c = QColor(c.red(), c.green(), c.blue(), 35);
+            const qreal sy = db.bottom() - 2 - (i + 1) * (db.height() - 4) / segs;
+            const qreal sh = (db.height() - 4) / segs - 1.0;
+            p.fillRect(QRectF(db.left() + 2, sy, db.width() - 4, sh), c);
+        }
     }
-    PaintKit::drawLabel(p, QRectF(db.left() - 8, db.bottom() + 1, 24, 10),
+    PaintKit::drawLabel(p, QRectF(db.left() - 8, db.bottom() + 1, 26, 10),
                         QStringLiteral("DBFB"), 5, true,
                         (m_megaBass || m_dynBoost) ? th.accentHot : th.labelDim);
     fx = db.right() + 8;
 
-    // 频谱分析仪
-    const qreal meterW = qBound(64.0, body.width() * 0.20, 128.0);
+    // 频谱分析仪（带网格）
+    const qreal meterW = qBound(70.0, body.width() * 0.20, 132.0);
     const QRectF meter(fx, faderTop, meterW, faderH);
-    PaintKit::fillBeveledRect(p, meter, th.ampWell, 1.5, 2, false);
+    PaintKit::fillBeveledRect(p, meter, th.ampWell, 1.5, 2.2, false);
     const QRectF meterIn = meter.adjusted(3, 3, -3, -12);
-    const int bars = qMax(8, int(meterIn.width() / 5));
+    p.setPen(QPen(QColor(th.labelDim.red(), th.labelDim.green(), th.labelDim.blue(), 40), 1));
+    for (int g = 1; g < 4; ++g) {
+        const qreal gy = meterIn.bottom() - meterIn.height() * g / 4.0;
+        p.drawLine(QPointF(meterIn.left(), gy), QPointF(meterIn.right(), gy));
+    }
+    const int bars = qMax(10, int(meterIn.width() / 4.5));
     for (int i = 0; i < bars; ++i) {
         const float t = float(i) / float(qMax(1, bars - 1));
         const int bi = int(t * qMax(0, m_bands.size() - 1));
-        float v = m_bands.isEmpty() ? 0.15f : m_bands[bi];
+        float v = m_bands.isEmpty() ? 0.12f : m_bands[bi];
         if (m_dolby)
             v *= (0.75f + 0.25f * (1.f - t));
+        if (m_hpf)
+            v *= (0.35f + 0.65f * t);
+        if (m_lpf)
+            v *= (1.f - 0.55f * t);
         if (m_stereoWide)
-            v *= (0.92f + 0.16f * qAbs(t - 0.5f) * 2.f);
+            v *= (0.90f + 0.20f * qAbs(t - 0.5f) * 2.f);
+        if (m_mono)
+            v *= 0.92f;
         const qreal bh = meterIn.height() * PaintKit::clamp01(v);
         const qreal bx = meterIn.left() + i * (meterIn.width() / bars);
-        const qreal bw = qMax(2.0, meterIn.width() / bars - 1.2);
+        const qreal bw = qMax(2.0, meterIn.width() / bars - 1.0);
         QLinearGradient bg(QPointF(bx, meterIn.bottom()), QPointF(bx, meterIn.bottom() - bh));
-        bg.setColorAt(0.0, th.ledCool.darker(120));
+        bg.setColorAt(0.0, th.ledCool.darker(125));
         bg.setColorAt(0.55, th.accent);
         bg.setColorAt(1.0, th.ledDanger);
         p.fillRect(QRectF(bx, meterIn.bottom() - bh, bw, bh), bg);
         if (m_peakHold && bi < m_peaks.size()) {
             const qreal py = meterIn.bottom() - meterIn.height() * PaintKit::clamp01(m_peaks[bi]);
-            p.fillRect(QRectF(bx, py, bw, 1.6), th.vfdGlow);
+            p.fillRect(QRectF(bx, py, bw, 1.5), th.vfdGlow);
         }
     }
     PaintKit::drawLabel(p, QRectF(meter.left(), meter.bottom() - 11, meter.width(), 10),
-                        QStringLiteral("ANALYZER · %1").arg(vizModeLabel()), 5, true, th.labelDim);
+                        QStringLiteral("SPECTRUM · %1").arg(vizModeLabel()), 5, true, th.labelDim);
     m_hit[QStringLiteral("amp:viz")] = meter;
-    PaintKit::drawLed(p, QPointF(meter.right() - 8, meter.top() + 6), m_dolby, th.ledCool, 1.8);
-    PaintKit::drawLabel(p, QRectF(meter.right() - 34, meter.top() + 1, 24, 8),
-                        QStringLiteral("NR"), 5, true,
-                        m_dolby ? th.ledCool : th.labelDim,
-                        Qt::AlignRight | Qt::AlignVCenter);
-    fx = meter.right() + 8;
+    fx = meter.right() + 7;
 
-    // L/R 峰值条
-    const qreal peakW = 18;
-    const QRectF peakBox(fx, faderTop, peakW, faderH);
-    PaintKit::fillBeveledRect(p, peakBox, th.ampWell, 1.2, 2, false);
-    auto drawPeak = [&](qreal x, float lv, const QColor &c) {
-        const qreal ph = (peakBox.height() - 14) * PaintKit::clamp01(lv);
-        p.fillRect(QRectF(x, peakBox.bottom() - 12 - ph, 5, ph), c);
+    // 双指针功率/VU 表（表窗内裁剪，左右留缝）
+    const qreal needleW = qBound(56.0, body.width() * 0.14, 84.0);
+    const qreal needleGap = 8.0;
+    const QRectF needleL(fx, faderTop, needleW, faderH);
+    const QRectF needleR(fx + needleW + needleGap, faderTop, needleW, faderH);
+    drawNeedleMeter(p, needleL, m_needleL, QStringLiteral("L  VU"));
+    drawNeedleMeter(p, needleR, m_needleR, QStringLiteral("R  VU"));
+    fx = needleR.right() + 10;
+
+    // 旋钮井：MIC / PRESENCE / VOLUME / ECHO
+    const qreal knobsW = body.right() - fx;
+    const qreal maxR = qMin(20.0, body.height() * 0.30);
+    const qreal volR = qBound(10.0, maxR, 18.0);
+    const qreal smallR = qBound(7.5, volR * 0.62, 12.0);
+    const qreal cy = body.center().y() - 2;
+    const QPointF mic(fx + knobsW * 0.12, cy);
+    const QPointF presence(fx + knobsW * 0.36, cy);
+    const QPointF vol(fx + knobsW * 0.62, cy);
+    const QPointF echo(fx + knobsW * 0.88, cy);
+
+    auto knobWell = [&](const QPointF &c, qreal r) {
+        const QRectF well(c.x() - r - 5, c.y() - r - 5, (r + 5) * 2, (r + 5) * 2);
+        PaintKit::fillBeveledRect(p, well, th.chassisLo, 2, 2.5, false);
     };
-    drawPeak(peakBox.left() + 3, m_left * (m_stereoWide ? 1.08f : 1.f), th.ledCool);
-    drawPeak(peakBox.left() + 10, m_right * (m_stereoWide ? 1.08f : 1.f), th.accentHot);
-    PaintKit::drawLabel(p, QRectF(peakBox.left() - 2, peakBox.bottom() - 11, peakW + 4, 10),
-                        QStringLiteral("L R"), 5, true, th.labelDim);
-    fx = peakBox.right() + 10;
-
-    // 旋钮区
-    const qreal knobsW = body.right() - fx - 2;
-    const qreal maxR = qMin(22.0, body.height() * 0.32);
-    const qreal volR = qBound(11.0, maxR, 20.0);
-    const qreal smallR = qBound(8.0, volR * 0.58, 13.0);
-    const qreal cy = body.center().y() - 3;
-    const QPointF mic(fx + knobsW * 0.18, cy);
-    const QPointF vol(fx + knobsW * 0.50, cy);
-    const QPointF echo(fx + knobsW * 0.82, cy);
+    knobWell(mic, smallR);
+    knobWell(presence, smallR);
+    knobWell(vol, volR);
+    knobWell(echo, smallR);
     PaintKit::drawKnob(p, mic, smallR, m_micLevel, th.accent);
+    PaintKit::drawKnob(p, presence, smallR, m_presence, th.ledCool);
     PaintKit::drawKnob(p, vol, volR, m_mute ? 0.f : m_volume,
                        m_mute ? th.labelDim : th.ledDanger);
     PaintKit::drawKnob(p, echo, smallR, m_echoLevel, th.accentHot);
@@ -1332,20 +1608,25 @@ void CassetteDeckWidget::drawAmpModule(QPainter &p, const QRectF &rect)
                                              (volR + 8) * 2, (volR + 8) * 2);
     m_hit[QStringLiteral("amp:mic")] = QRectF(mic.x() - smallR - 6, mic.y() - smallR - 6,
                                               (smallR + 6) * 2, (smallR + 6) * 2);
+    m_hit[QStringLiteral("amp:presence")] = QRectF(presence.x() - smallR - 6, presence.y() - smallR - 6,
+                                                   (smallR + 6) * 2, (smallR + 6) * 2);
     m_hit[QStringLiteral("amp:echo")] = QRectF(echo.x() - smallR - 6, echo.y() - smallR - 6,
                                                (smallR + 6) * 2, (smallR + 6) * 2);
 
     const qreal labY = face.bottom() - captionH;
-    PaintKit::drawLabel(p, QRectF(mic.x() - 34, labY, 68, captionH), QStringLiteral("MIC"), 5, true, th.labelDim);
-    PaintKit::drawLabel(p, QRectF(vol.x() - 34, labY, 68, captionH),
+    PaintKit::drawLabel(p, QRectF(mic.x() - 28, labY, 56, captionH), QStringLiteral("MIC"), 5, true, th.labelDim);
+    PaintKit::drawLabel(p, QRectF(presence.x() - 28, labY, 56, captionH), QStringLiteral("PRESENCE"), 5, true, th.labelDim);
+    PaintKit::drawLabel(p, QRectF(vol.x() - 30, labY, 60, captionH),
                         m_mute ? QStringLiteral("MUTE") : QStringLiteral("VOLUME"), 6,
                         true, m_mute ? th.ledDanger : th.label);
-    PaintKit::drawLabel(p, QRectF(echo.x() - 34, labY, 68, captionH), QStringLiteral("ECHO"), 5, true, th.labelDim);
+    PaintKit::drawLabel(p, QRectF(echo.x() - 28, labY, 56, captionH), QStringLiteral("ECHO"), 5, true, th.labelDim);
 
-    PaintKit::drawLed(p, QPointF(face.right() - 50, face.bottom() - 14), m_stereoWide, th.ledCool, 2.0);
-    PaintKit::drawLed(p, QPointF(face.right() - 34, face.bottom() - 14), m_surround, th.accentHot, 2.0);
-    PaintKit::drawLed(p, QPointF(face.right() - 18, face.bottom() - 14),
-                      m_sleepPresetMin > 0, th.ledWarm, 2.0);
+    // 状态指示灯排
+    PaintKit::drawLed(p, QPointF(face.right() - 62, face.bottom() - 13), m_hpf, th.ledCool, 1.8);
+    PaintKit::drawLed(p, QPointF(face.right() - 48, face.bottom() - 13), m_lpf, th.accentHot, 1.8);
+    PaintKit::drawLed(p, QPointF(face.right() - 34, face.bottom() - 13), m_mono, th.ledWarm, 1.8);
+    PaintKit::drawLed(p, QPointF(face.right() - 20, face.bottom() - 13),
+                      m_sleepPresetMin > 0, th.vfdGlow, 1.8);
     p.restore();
 }
 
@@ -2362,21 +2643,31 @@ void CassetteDeckWidget::flatKey(QPainter &p, const QRectF &rect, const QString 
     const bool pressed = m_pressed == key;
     const bool hover = m_hover == key;
     QColor face = hover ? m_theme.chassisMid.lighter(118) : m_theme.chassisMid;
+    if (lit)
+        face = face.lighter(108);
     const QRectF r = rect.adjusted(0, pressed ? 1 : 0, 0, pressed ? 1 : 0);
     PaintKit::fillBeveledRect(p, r, face, 2, 3, !pressed);
 
-    // 指示灯与文字分区，避免红点压住首字母
     const bool showLed = hasLed || lit;
-    const qreal ledPad = showLed ? 12.0 : 0.0;
-    const QRectF textR = r.adjusted(ledPad + 1, 0, -2, 0);
-    const int fontPx = (title.size() >= 8 && textR.width() < 52) ? 5
-                     : (title.size() >= 6 && textR.width() < 56) ? 6 : 7;
-    PaintKit::drawLabel(p, textR, title, fontPx, true,
-                        lit ? m_theme.labelHot : m_theme.label);
-    if (showLed) {
+    // 窄键：灯在上、字在下，避免 STO 被裁成半个字母
+    const bool stacked = showLed && (r.width() < 40 || (title.size() >= 3 && r.width() < 48));
+    QRectF textR;
+    if (stacked) {
+        PaintKit::drawLed(p, QPointF(r.center().x(), r.top() + 4.2), lit,
+                          lit ? m_theme.ledWarm : m_theme.chassisLo, lit ? 1.7 : 1.4);
+        textR = r.adjusted(1, 7, -1, -1);
+    } else if (showLed) {
         PaintKit::drawLed(p, QPointF(r.left() + 6, r.center().y()), lit,
                           lit ? m_theme.ledWarm : m_theme.chassisLo, lit ? 1.9 : 1.55);
+        textR = r.adjusted(12, 0, -2, 0);
+    } else {
+        textR = r.adjusted(2, 0, -2, 0);
     }
+    const int fontPx = (title.size() >= 8 && textR.width() < 52) ? 5
+                     : (title.size() >= 5 && textR.width() < 44) ? 5
+                     : (title.size() >= 4 && textR.width() < 40) ? 5 : 6;
+    PaintKit::drawLabel(p, textR, title, fontPx, true,
+                        lit ? m_theme.labelHot : m_theme.label);
     m_hit[key] = rect;
 }
 
@@ -2455,6 +2746,7 @@ void CassetteDeckWidget::mousePressEvent(QMouseEvent *event)
         return;
     }
     if (key == QLatin1String("amp:mic") || key == QLatin1String("amp:echo")
+        || key == QLatin1String("amp:presence")
         || key == QLatin1String("amp:bass") || key == QLatin1String("amp:mid")
         || key == QLatin1String("amp:treble") || key == QLatin1String("amp:balance")) {
         m_dragSlider = key;
@@ -2587,6 +2879,84 @@ void CassetteDeckWidget::mouseReleaseEvent(QMouseEvent *event)
     }
     if (key == QLatin1String("amp:peak")) {
         m_peakHold = !m_peakHold;
+        update();
+        return;
+    }
+    if (key == QLatin1String("amp:hpf")) {
+        m_hpf = !m_hpf;
+        update();
+        return;
+    }
+    if (key == QLatin1String("amp:lpf")) {
+        m_lpf = !m_lpf;
+        update();
+        return;
+    }
+    if (key == QLatin1String("amp:mono")) {
+        m_mono = !m_mono; // STEREO 键：点亮=立体声
+        update();
+        return;
+    }
+    if (key == QLatin1String("amp:spka")) {
+        m_spkA = !m_spkA;
+        if (!m_spkA && !m_spkB)
+            m_spkB = true; // 至少保留一路
+        update();
+        return;
+    }
+    if (key == QLatin1String("amp:spkb")) {
+        m_spkB = !m_spkB;
+        if (!m_spkA && !m_spkB)
+            m_spkA = true;
+        update();
+        return;
+    }
+    if (key == QLatin1String("amp:direct")) {
+        m_direct = !m_direct;
+        update();
+        return;
+    }
+    if (key == QLatin1String("amp:pure")) {
+        m_pureAudio = !m_pureAudio;
+        if (m_pureAudio) {
+            m_direct = true;
+            m_dynBoost = false;
+            m_megaBass = false;
+            emit megaBassToggled(false);
+        }
+        update();
+        return;
+    }
+    if (key == QLatin1String("amp:store")) {
+        m_eqStoreArmed = !m_eqStoreArmed;
+        update();
+        return;
+    }
+    if (key == QLatin1String("amp:eqa") || key == QLatin1String("amp:eqb")) {
+        const char bank = (key == QLatin1String("amp:eqa")) ? 'A' : 'B';
+        float *mem = (bank == 'A') ? m_eqMemA : m_eqMemB;
+        if (m_eqStoreArmed) {
+            mem[0] = m_bass; mem[1] = m_mid; mem[2] = m_treble; mem[3] = m_balance;
+            m_eqStoreArmed = false;
+            m_eqBank = bank;
+        } else {
+            m_bass = mem[0]; m_mid = mem[1]; m_treble = mem[2]; m_balance = mem[3];
+            m_eqBank = bank;
+            m_preset.clear();
+            emitTone();
+        }
+        update();
+        return;
+    }
+    if (key.startsWith(QLatin1String("amp:src:"))) {
+        // 面板 SOURCE 指示：PHONO/AUX 仅作监听标签；TAPE/FM 跟随真实音源
+        const QString src = key.mid(8);
+        if (src == QLatin1String("TAPE") || src == QLatin1String("FM")) {
+            // 只反馈显示，不强制切模式（由播放逻辑主导）
+            m_sourceMode = src;
+        } else {
+            m_sourceMode = src; // PHONO / AUX 展示用
+        }
         update();
         return;
     }
@@ -2866,6 +3236,8 @@ void CassetteDeckWidget::setSliderFromPos(const QString &key, const QPointF &pos
         m_micLevel = value;
     else if (key == QLatin1String("amp:echo"))
         m_echoLevel = value;
+    else if (key == QLatin1String("amp:presence"))
+        m_presence = value;
     update();
 }
 

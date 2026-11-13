@@ -1,9 +1,9 @@
 ; 拾音盒子 Windows Installer
-; Version 1.1.0  Author: KK-Files  Contact: QQ 827212416  2026.11 Chengdu
+; Version 1.2.0  Author: KK-Files  Contact: QQ 827212416  2026.11 Chengdu
 
 #define MyAppName "拾音盒子"
 #define MyAppDisplayName "拾音盒子"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "KK-Files"
 #define MyAppExeName "FH_KAOK.exe"
 
@@ -50,7 +50,7 @@ Name: "zh"; MessagesFile: "compiler:Default.isl"; LicenseFile: "assets\license.t
 
 [Messages]
 WelcomeLabel1=欢迎来到 [name]
-WelcomeLabel2=这不是一台冰冷的播放器，而是一间被缩小的听音室。%n%n双卡仓静候磁带，FM 刻度游走城市电台，琥珀色 VFD 随节拍呼吸，音箱纸盆随着波形微微颤动。%n%n作者：KK-Files%n联系：QQ 827212416%n版本：V1.1.0%n时间：2026.11 · 成都%n%n安装只需片刻——像按下 PLAY 之前，先深吸一口气。
+WelcomeLabel2=这不是一台冰冷的播放器，而是一间被缩小的听音室。%n%n双卡仓静候磁带，FM 刻度游走城市电台，琥珀色 VFD 随节拍呼吸，音箱纸盆随着波形微微颤动。%n%n作者：KK-Files%n联系：QQ 827212416%n版本：V1.2.0%n时间：2026.11 · 成都%n%n安装只需片刻——像按下 PLAY 之前，先深吸一口气。
 FinishedHeadingLabel=[name] 已就位
 FinishedLabel=安装完成。%n%n从今晚起，让旋律慢慢铺开。%n愿琥珀色的灯火，陪您把每一首歌听到尽头。%n%n— KK-Files%nQQ 827212416 · 2026.11 成都
 ClickFinish=点击「完成」，推开听音室的门。
@@ -75,7 +75,7 @@ ButtonInstall=安装(&I)
 ButtonFinish=完成(&F)
 ButtonCancel=取消
 ButtonBrowse=浏览(&R)...
-BeveledLabel=拾音盒子 V1.1.0  ·  KK-Files  ·  QQ 827212416  ·  2026.11 成都
+BeveledLabel=拾音盒子 V1.2.0  ·  KK-Files  ·  QQ 827212416  ·  2026.11 成都
 SetupAppTitle=安装向导
 SetupWindowTitle=安装向导 — %1
 ExitSetupTitle=先离开吗？
