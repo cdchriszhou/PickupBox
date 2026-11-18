@@ -12,12 +12,18 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QCursor>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QKeySequence>
 #include <QActionGroup>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSettings>
@@ -56,12 +62,13 @@ MainWindow::MainWindow(QWidget *parent)
 {
     setWindowTitle(QStringLiteral("拾音盒子"));
     resize(1040, 720);
-    setMinimumSize(920, 640);
+    setMinimumSize(960, 640);
     setAcceptDrops(true);
 
     m_engine = new AudioEngine(this);
     m_deck = new CassetteDeckWidget;
     m_radioBrowser = new RadioBrowser(this);
+    m_geoNam = new QNetworkAccessManager(this);
 
     auto *root = new QWidget;
     auto *layout = new QVBoxLayout(root);
@@ -208,14 +215,247 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_engine->setVolume(0.75f);
     setRadioPower(false);
-    // 默认拉成都全量台（不自动播放）
-    applyRegion(QStringLiteral("chengdu"), false);
-
+    // 先立刻加载上次/默认城市，避免定位卡住导致电台空白；后台再按 IP 切城
+    detectCityAndLoadRadio();
 }
 
 void MainWindow::initRegions()
 {
     m_regions = RadioBrowser::defaultRegions();
+}
+
+void MainWindow::detectCityAndLoadRadio()
+{
+    QSettings settings(QStringLiteral("KK-Files"), QStringLiteral("PickupBox"));
+    QString bootstrap = settings.value(QStringLiteral("radio/region"), QStringLiteral("chengdu")).toString();
+    if (regionIndex(bootstrap) < 0)
+        bootstrap = QStringLiteral("chengdu");
+    applyRegion(bootstrap, false);
+
+    // 国内可达的 HTTPS 定位源（ip-api 在国内常超时，不再首选）
+    m_geoProviders = {
+        QStringLiteral("https://ip9.com.cn/get"),
+        QStringLiteral("https://myip.ipip.net/json"),
+    };
+    m_geoProviderIndex = 0;
+    m_geoActive = true;
+    statusBar()->showMessage(tr("正在识别所在城市以便切换本地电台…"), 4000);
+    tryNextGeoProvider();
+}
+
+void MainWindow::requestGeoLocate(const QUrl &url)
+{
+    if (m_geoReply) {
+        m_geoReply->disconnect(this);
+        m_geoReply->abort();
+        m_geoReply->deleteLater();
+        m_geoReply = nullptr;
+    }
+
+    QNetworkRequest req(url);
+    req.setHeader(QNetworkRequest::UserAgentHeader,
+                  QStringLiteral("PickupBox/1.2.1 (KK-Files; Qt)"));
+    req.setTransferTimeout(4000);
+    m_geoReply = m_geoNam->get(req);
+    connect(m_geoReply, &QNetworkReply::finished, this, [this]() {
+        onGeoLocateFinished(m_geoReply);
+    });
+}
+
+void MainWindow::tryNextGeoProvider()
+{
+    if (!m_geoActive)
+        return;
+    if (m_geoProviderIndex >= m_geoProviders.size()) {
+        m_geoActive = false;
+        return;
+    }
+    const QUrl url(m_geoProviders.at(m_geoProviderIndex++));
+    requestGeoLocate(url);
+}
+
+void MainWindow::onGeoLocateFinished(QNetworkReply *reply)
+{
+    if (!reply)
+        return;
+    if (reply == m_geoReply)
+        m_geoReply = nullptr;
+    reply->deleteLater();
+
+    if (!m_geoActive)
+        return;
+
+    auto parseGeo = [](const QByteArray &raw, QString *city, QString *regionName,
+                       QString *countryCode) -> bool {
+        const QJsonObject root = QJsonDocument::fromJson(raw).object();
+        if (root.isEmpty())
+            return false;
+
+        // ip9.com.cn: { ret:200, data:{ city, prov, country_code } }
+        if (root.contains(QStringLiteral("data")) && root.value(QStringLiteral("data")).isObject()) {
+            const QJsonObject data = root.value(QStringLiteral("data")).toObject();
+            if (data.contains(QStringLiteral("location")) && data.value(QStringLiteral("location")).isArray()) {
+                // myip.ipip.net: data.location = [国家, 省, 市, ...]
+                const auto loc = data.value(QStringLiteral("location")).toArray();
+                if (loc.size() >= 3) {
+                    *countryCode = loc.at(0).toString().contains(QStringLiteral("中国"))
+                                       ? QStringLiteral("CN")
+                                       : QString();
+                    *regionName = loc.at(1).toString().trimmed();
+                    *city = loc.at(2).toString().trimmed();
+                    return !city->isEmpty() || !regionName->isEmpty();
+                }
+            }
+            *city = data.value(QStringLiteral("city")).toString().trimmed();
+            *regionName = data.value(QStringLiteral("prov")).toString().trimmed();
+            if (regionName->isEmpty())
+                *regionName = data.value(QStringLiteral("region")).toString().trimmed();
+            *countryCode = data.value(QStringLiteral("country_code")).toString().trimmed();
+            if (countryCode->isEmpty()
+                && data.value(QStringLiteral("country")).toString().contains(QStringLiteral("中国")))
+                *countryCode = QStringLiteral("CN");
+            return !city->isEmpty() || !regionName->isEmpty();
+        }
+
+        // ip-api 兼容：status/city/regionName/countryCode
+        if (root.value(QStringLiteral("status")).toString() == QLatin1String("success")
+            || root.contains(QStringLiteral("city"))) {
+            *city = root.value(QStringLiteral("city")).toString().trimmed();
+            *regionName = root.value(QStringLiteral("regionName")).toString().trimmed();
+            *countryCode = root.value(QStringLiteral("countryCode")).toString().trimmed();
+            return !city->isEmpty() || !regionName->isEmpty();
+        }
+        return false;
+    };
+
+    if (reply->error() != QNetworkReply::NoError) {
+        tryNextGeoProvider();
+        return;
+    }
+
+    QString city;
+    QString regionName;
+    QString countryCode;
+    if (!parseGeo(reply->readAll(), &city, &regionName, &countryCode)) {
+        tryNextGeoProvider();
+        return;
+    }
+
+    const QString matched = matchRegionFromGeo(city, regionName, countryCode);
+    m_geoActive = false;
+    if (matched.isEmpty()) {
+        statusBar()->showMessage(
+            tr("定位到 %1 %2，暂无对应城市台，保持当前电台").arg(regionName, city), 5000);
+        return;
+    }
+
+    const int ri = regionIndex(matched);
+    const QString label = ri >= 0 ? m_regions[ri].name : matched;
+    if (matched == m_regionId) {
+        statusBar()->showMessage(tr("网络定位：当前已是「%1」电台").arg(label), 4000);
+        return;
+    }
+
+    statusBar()->showMessage(
+        tr("已根据网络定位切换到「%1」电台（%2 %3）").arg(label, regionName, city), 6000);
+    applyRegion(matched, false);
+}
+
+QString MainWindow::matchRegionFromGeo(const QString &city, const QString &regionName,
+                                       const QString &countryCode) const
+{
+    const QString cityNorm = city.simplified();
+    const QString regionNorm = regionName.simplified();
+    const QString cc = countryCode.toUpper();
+
+    auto containsAny = [](const QString &hay, const QStringList &needles) {
+        for (const QString &n : needles) {
+            if (!n.isEmpty() && hay.contains(n, Qt::CaseInsensitive))
+                return true;
+        }
+        return false;
+    };
+
+    // 1) 城市名精确/包含匹配到地区列表
+    for (const RadioRegionDef &r : m_regions) {
+        if (!cityNorm.isEmpty()) {
+            if (cityNorm.contains(r.name, Qt::CaseInsensitive)
+                || r.name.contains(cityNorm, Qt::CaseInsensitive))
+                return r.id;
+            if (containsAny(cityNorm, r.nameQueries))
+                return r.id;
+        }
+    }
+
+    // 2) 省/州名映射到代表城市（列表中没有的地级市也能落到省会）
+    static const QList<QPair<QStringList, QString>> kProvinceMap = {
+        {{QStringLiteral("北京"), QStringLiteral("Beijing")}, QStringLiteral("beijing")},
+        {{QStringLiteral("上海"), QStringLiteral("Shanghai")}, QStringLiteral("shanghai")},
+        {{QStringLiteral("天津"), QStringLiteral("Tianjin")}, QStringLiteral("tianjin")},
+        {{QStringLiteral("重庆"), QStringLiteral("Chongqing")}, QStringLiteral("chongqing")},
+        {{QStringLiteral("四川"), QStringLiteral("Sichuan"), QStringLiteral("成都")}, QStringLiteral("chengdu")},
+        {{QStringLiteral("广东"), QStringLiteral("Guangdong")}, QStringLiteral("guangzhou")},
+        {{QStringLiteral("浙江"), QStringLiteral("Zhejiang")}, QStringLiteral("hangzhou")},
+        {{QStringLiteral("江苏"), QStringLiteral("Jiangsu")}, QStringLiteral("nanjing")},
+        {{QStringLiteral("湖北"), QStringLiteral("Hubei")}, QStringLiteral("wuhan")},
+        {{QStringLiteral("陕西"), QStringLiteral("Shaanxi")}, QStringLiteral("xian")},
+        {{QStringLiteral("山东"), QStringLiteral("Shandong")}, QStringLiteral("qingdao")},
+        {{QStringLiteral("福建"), QStringLiteral("Fujian")}, QStringLiteral("xiamen")},
+        {{QStringLiteral("云南"), QStringLiteral("Yunnan")}, QStringLiteral("kunming")},
+        {{QStringLiteral("湖南"), QStringLiteral("Hunan")}, QStringLiteral("changsha")},
+        {{QStringLiteral("河南"), QStringLiteral("Henan")}, QStringLiteral("zhengzhou")},
+        {{QStringLiteral("辽宁"), QStringLiteral("Liaoning")}, QStringLiteral("shenyang")},
+        {{QStringLiteral("黑龙江"), QStringLiteral("Heilongjiang")}, QStringLiteral("haerbin")},
+        {{QStringLiteral("香港"), QStringLiteral("Hong Kong")}, QStringLiteral("hongkong")},
+        {{QStringLiteral("台湾"), QStringLiteral("Taiwan")}, QStringLiteral("taipei")},
+        {{QStringLiteral("东京"), QStringLiteral("Tokyo"), QStringLiteral("Japan")}, QStringLiteral("tokyo")},
+        {{QStringLiteral("首尔"), QStringLiteral("Seoul"), QStringLiteral("Korea")}, QStringLiteral("seoul")},
+        {{QStringLiteral("新加坡"), QStringLiteral("Singapore")}, QStringLiteral("singapore")},
+        {{QStringLiteral("伦敦"), QStringLiteral("England"), QStringLiteral("United Kingdom")}, QStringLiteral("london")},
+        {{QStringLiteral("巴黎"), QStringLiteral("Île-de-France"), QStringLiteral("France")}, QStringLiteral("paris")},
+        {{QStringLiteral("纽约"), QStringLiteral("New York")}, QStringLiteral("nyc")},
+        {{QStringLiteral("加州"), QStringLiteral("California")}, QStringLiteral("sf")},
+        {{QStringLiteral("阿姆斯特丹"), QStringLiteral("North Holland"), QStringLiteral("Netherlands")}, QStringLiteral("amsterdam")},
+    };
+
+    // 广东细分：深圳/东莞/佛山优先
+    if (containsAny(cityNorm, {QStringLiteral("深圳"), QStringLiteral("Shenzhen")})
+        || containsAny(regionNorm, {QStringLiteral("深圳")}))
+        return QStringLiteral("shenzhen");
+    if (containsAny(cityNorm, {QStringLiteral("东莞"), QStringLiteral("Dongguan")}))
+        return QStringLiteral("dongguan");
+    if (containsAny(cityNorm, {QStringLiteral("佛山"), QStringLiteral("Foshan")}))
+        return QStringLiteral("foshan");
+    if (containsAny(cityNorm, {QStringLiteral("苏州"), QStringLiteral("Suzhou")}))
+        return QStringLiteral("suzhou");
+    if (containsAny(cityNorm, {QStringLiteral("福州"), QStringLiteral("Fuzhou")}))
+        return QStringLiteral("fuzhou");
+
+    for (const auto &pair : kProvinceMap) {
+        if (containsAny(cityNorm, pair.first) || containsAny(regionNorm, pair.first))
+            return pair.second;
+    }
+
+    // 3) 国家码粗匹配
+    if (cc == QLatin1String("CN") || cc == QLatin1String("HK") || cc == QLatin1String("TW")
+        || cc == QLatin1String("MO"))
+        return QStringLiteral("china");
+    if (cc == QLatin1String("US"))
+        return QStringLiteral("nyc");
+    if (cc == QLatin1String("GB") || cc == QLatin1String("UK"))
+        return QStringLiteral("london");
+    if (cc == QLatin1String("JP"))
+        return QStringLiteral("tokyo");
+    if (cc == QLatin1String("KR"))
+        return QStringLiteral("seoul");
+    if (cc == QLatin1String("FR"))
+        return QStringLiteral("paris");
+    if (cc == QLatin1String("NL"))
+        return QStringLiteral("amsterdam");
+    if (cc == QLatin1String("SG"))
+        return QStringLiteral("singapore");
+
+    return {};
 }
 
 void MainWindow::applyRegion(const QString &regionId, bool autoTune)
@@ -234,6 +474,11 @@ void MainWindow::applyRegion(const QString &regionId, bool autoTune)
     if (autoTune)
         m_deck->setMediaTab(CassetteDeckWidget::MediaTab::Radio);
     rebuildRadioStationMenu();
+
+    {
+        QSettings settings(QStringLiteral("KK-Files"), QStringLiteral("PickupBox"));
+        settings.setValue(QStringLiteral("radio/region"), regionId);
+    }
 
     m_radioBrowser->fetchRegion(m_regions[ri]);
 }

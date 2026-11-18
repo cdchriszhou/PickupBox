@@ -12,6 +12,8 @@
 class AudioEngine;
 class QActionGroup;
 class QMenu;
+class QNetworkAccessManager;
+class QNetworkReply;
 
 struct RadioStation {
     float freq = 0;
@@ -52,6 +54,7 @@ private slots:
     void onRemoteFetchFailed(const QString &regionId, const QString &message);
     void onTrackSelected(int index);
     void about();
+    void onGeoLocateFinished(QNetworkReply *reply);
 
 private:
     void buildMenu();
@@ -61,6 +64,11 @@ private:
     void syncDeckPlaylist();
     void loadLyricsForCurrent();
     void initRegions();
+    void detectCityAndLoadRadio();
+    void requestGeoLocate(const QUrl &url);
+    void tryNextGeoProvider();
+    QString matchRegionFromGeo(const QString &city, const QString &regionName,
+                               const QString &countryCode) const;
     void applyRegion(const QString &regionId, bool autoTune);
     void applyRemoteStations(const QVector<RemoteStation> &remote, bool autoTune);
     void applyFrequency(float mhz, bool autoPlay);
@@ -76,6 +84,11 @@ private:
     AudioEngine *m_engine = nullptr;
     CassetteDeckWidget *m_deck = nullptr;
     RadioBrowser *m_radioBrowser = nullptr;
+    QNetworkAccessManager *m_geoNam = nullptr;
+    QNetworkReply *m_geoReply = nullptr;
+    QStringList m_geoProviders;
+    int m_geoProviderIndex = 0;
+    bool m_geoActive = false;
     qint64 m_duration = 0;
     QStringList m_playlist;
     int m_playlistIndex = -1;

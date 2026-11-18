@@ -20,13 +20,29 @@ QHash<QString, QPixmap> &cache()
     return c;
 }
 
+// 尺寸量化 + 缓存上限，避免窗口缩放时纹理缓存暴涨拖卡
+int quantDim(int v)
+{
+    return qMax(1, (qMax(1, v) + 4) & ~7);
+}
+
+void trimCacheIfNeeded()
+{
+    auto &c = cache();
+    if (c.size() > 96)
+        c.clear();
+}
+
 } // namespace
 
 QPixmap plasticNoise(int w, int h, int seed, int strength)
 {
+    w = quantDim(w);
+    h = quantDim(h);
     const QString key = QStringLiteral("pn-%1-%2-%3-%4").arg(w).arg(h).arg(seed).arg(strength);
     if (cache().contains(key))
         return cache().value(key);
+    trimCacheIfNeeded();
 
     QImage img(qMax(1, w / 2), qMax(1, h / 2), QImage::Format_ARGB32_Premultiplied);
     img.fill(Qt::transparent);
@@ -50,9 +66,12 @@ QPixmap plasticNoise(int w, int h, int seed, int strength)
 
 QPixmap clothMesh(int w, int h, int seed)
 {
+    w = quantDim(w);
+    h = quantDim(h);
     const QString key = QStringLiteral("cm-%1-%2-%3").arg(w).arg(h).arg(seed);
     if (cache().contains(key))
         return cache().value(key);
+    trimCacheIfNeeded();
 
     const int sw = qBound(64, w, 180);
     const int sh = qBound(64, h, 520);
@@ -81,9 +100,12 @@ QPixmap clothMesh(int w, int h, int seed)
 
 QPixmap brushedMetal(int w, int h, int seed)
 {
+    w = quantDim(w);
+    h = quantDim(h);
     const QString key = QStringLiteral("bm-%1-%2-%3").arg(w).arg(h).arg(seed);
     if (cache().contains(key))
         return cache().value(key);
+    trimCacheIfNeeded();
 
     QImage img(qMax(1, w), qMax(1, h), QImage::Format_RGB32);
     std::mt19937 rng(static_cast<unsigned>(seed));
@@ -103,9 +125,12 @@ QPixmap brushedMetal(int w, int h, int seed)
 
 QPixmap wornScratches(int w, int h, int seed)
 {
+    w = quantDim(w);
+    h = quantDim(h);
     const QString key = QStringLiteral("ws-%1-%2-%3").arg(w).arg(h).arg(seed);
     if (cache().contains(key))
         return cache().value(key);
+    trimCacheIfNeeded();
 
     QImage img(qMax(1, w), qMax(1, h), QImage::Format_ARGB32_Premultiplied);
     img.fill(Qt::transparent);

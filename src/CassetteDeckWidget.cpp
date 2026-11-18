@@ -22,7 +22,8 @@ CassetteDeckWidget::CassetteDeckWidget(QWidget *parent)
     m_peaks = QVector<float>(20, 0.f);
 
     auto *anim = new QTimer(this);
-    anim->setInterval(16);
+    // 30fps 足够 VU/转盘动画；16ms 全窗重绘更容易拖卡解码线程
+    anim->setInterval(33);
     connect(anim, &QTimer::timeout, this, &CassetteDeckWidget::tick);
     anim->start();
 
@@ -1527,8 +1528,17 @@ void CassetteDeckWidget::drawAmpModule(QPainter &p, const QRectF &rect)
                         (m_megaBass || m_dynBoost) ? th.accentHot : th.labelDim);
     fx = db.right() + 8;
 
-    // 频谱分析仪（带网格）
-    const qreal meterW = qBound(70.0, body.width() * 0.20, 132.0);
+    // 频谱 / VU / 旋钮：先预留旋钮井，避免窄窗时指针表把 VOLUME 挤出面板
+    constexpr qreal kKnobsMin = 118.0;
+    constexpr qreal kNeedleGap = 8.0;
+    qreal budget = qMax(40.0, body.right() - fx - kKnobsMin);
+    qreal meterW = qBound(52.0, qMin(body.width() * 0.18, budget * 0.40), 120.0);
+    qreal needleW = qBound(40.0, qMin(body.width() * 0.12, (budget - meterW - 7 - kNeedleGap) * 0.5), 72.0);
+    if (meterW + 7 + needleW * 2 + kNeedleGap > budget) {
+        meterW = qMax(48.0, budget * 0.36);
+        needleW = qMax(36.0, (budget - meterW - 7 - kNeedleGap) * 0.5);
+    }
+
     const QRectF meter(fx, faderTop, meterW, faderH);
     PaintKit::fillBeveledRect(p, meter, th.ampWell, 1.5, 2.2, false);
     const QRectF meterIn = meter.adjusted(3, 3, -3, -12);
@@ -1571,16 +1581,14 @@ void CassetteDeckWidget::drawAmpModule(QPainter &p, const QRectF &rect)
     fx = meter.right() + 7;
 
     // 双指针功率/VU 表（表窗内裁剪，左右留缝）
-    const qreal needleW = qBound(56.0, body.width() * 0.14, 84.0);
-    const qreal needleGap = 8.0;
     const QRectF needleL(fx, faderTop, needleW, faderH);
-    const QRectF needleR(fx + needleW + needleGap, faderTop, needleW, faderH);
+    const QRectF needleR(fx + needleW + kNeedleGap, faderTop, needleW, faderH);
     drawNeedleMeter(p, needleL, m_needleL, QStringLiteral("L  VU"));
     drawNeedleMeter(p, needleR, m_needleR, QStringLiteral("R  VU"));
     fx = needleR.right() + 10;
 
-    // 旋钮井：MIC / PRESENCE / VOLUME / ECHO
-    const qreal knobsW = body.right() - fx;
+    // 旋钮井：MIC / PRESENCE / VOLUME / ECHO（上方已预留宽度，避免挤出面板）
+    const qreal knobsW = qMax(1.0, body.right() - fx);
     const qreal maxR = qMin(20.0, body.height() * 0.30);
     const qreal volR = qBound(10.0, maxR, 18.0);
     const qreal smallR = qBound(7.5, volR * 0.62, 12.0);

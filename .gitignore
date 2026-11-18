@@ -20,9 +20,12 @@ styles/
 tls/
 installer/payload/
 installer/output/
+*.bak
+*.tmp
+*.log
+err.txt
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
 *.user
-err.txt
