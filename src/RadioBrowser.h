@@ -42,14 +42,20 @@ signals:
     void fetchFailed(const QString &regionId, const QString &message);
 
 private:
-    void startQuery(const QString &regionId, const QString &nameQuery, const QString &countryCode);
+    void startQuery(const QString &regionId, const QString &nameQuery,
+                    const QString &countryCode, int mirrorIndex, int generation);
     void onReplyFinished(QNetworkReply *reply);
-    void finishIfDone(const QString &regionId);
+    void finishIfDone(const QString &regionId, int generation);
+    void retryRegionOnNextMirror();
     static QVector<RemoteStation> parseStations(const QByteArray &json);
-    static QUrl pickApiBase();
+    static QStringList apiBases();
 
     QNetworkAccessManager *m_nam = nullptr;
     QString m_activeRegionId;
+    RadioRegionDef m_activeRegion;
+    int m_generation = 0;
+    int m_mirrorIndex = 0;
     int m_pending = 0;
+    bool m_hadNetworkError = false;
     QVector<RemoteStation> m_accum;
 };

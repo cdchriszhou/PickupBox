@@ -12,6 +12,8 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QCoreApplication>
+#include <QGuiApplication>
 #include <QMediaDevices>
 #include <QIODevice>
 #include <QTextStream>
@@ -20,6 +22,13 @@
 #include <QUrl>
 #include <QtMath>
 #include <utility>
+
+#ifdef Q_OS_WIN
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#endif
 
 // 本地文件不用 QMediaPlayer。Qt 6.8 FFmpeg 音频渲染把声卡缓冲卡在约 110ms，
 // 并且把可听延迟硬压在 22–64ms：本地解码比实时快，缓冲一直被顶满，
@@ -257,9 +266,39 @@ public:
     void resumePlayback()
     {
         m_paused = false;
+        m_deviceSuspended = false;
         if (m_sink && m_sink->state() == QAudio::SuspendedState)
             m_sink->resume();
         if (m_pump)
+            m_pump->start();
+        pullLimited();
+        pump();
+        const int token = m_token;
+        post([owner = m_owner, token] { owner->onLocalPlaying(token, true); });
+    }
+
+    // 锁屏/休眠后声卡常被系统挂起；解锁后恢复写入，切勿当成播完
+    void recoverFromSuspend()
+    {
+        if (m_paused)
+            return;
+        m_deviceSuspended = false;
+        // 若锁屏期间被误判曲终，只要还有未播完数据就允许继续
+        if (m_finishSent && (!pendingEmpty() || !m_decodeDone))
+            m_finishSent = false;
+        if (m_sink) {
+            const auto st = m_sink->state();
+            if (st == QAudio::SuspendedState) {
+                m_sink->resume();
+            } else if (st == QAudio::StoppedState
+                       || (st == QAudio::IdleState && !pendingEmpty())) {
+                if (!restartSinkIo())
+                    return;
+            }
+        } else if (m_format.isValid() && (!pendingEmpty() || !m_decodeDone)) {
+            openSink();
+        }
+        if (m_pump && !m_pump->isActive())
             m_pump->start();
         pullLimited();
         pump();
@@ -607,8 +646,28 @@ private:
         connect(sink, &QAudioSink::stateChanged, this, [this, sink](QAudio::State state) {
             if (sink != m_sink)
                 return;
-            if (state == QAudio::IdleState)
+            if (state == QAudio::SuspendedState) {
+                // 系统锁屏/省电会挂起 WASAPI；不要当作用户暂停或播完
+                m_deviceSuspended = true;
+                if (!m_paused) {
+                    QTimer::singleShot(400, this, [this] {
+                        if (m_paused || !m_sink || !m_deviceSuspended)
+                            return;
+                        if (m_sink->state() == QAudio::SuspendedState)
+                            m_sink->resume();
+                    });
+                }
+                return;
+            }
+            if (state == QAudio::ActiveState) {
+                m_deviceSuspended = false;
+                return;
+            }
+            if (state == QAudio::IdleState) {
+                if (m_deviceSuspended || m_paused)
+                    return;
                 onSinkIdle();
+            }
         });
         m_io = sink->start();
         m_sinkBaseUs = 0;
@@ -691,7 +750,7 @@ private:
 
     void onSinkIdle()
     {
-        if (m_inIdle || m_paused || !m_sinkStarted)
+        if (m_inIdle || m_paused || m_deviceSuspended || !m_sinkStarted)
             return;
         if (m_sessionWriteUs <= 0)
             return;
@@ -702,7 +761,7 @@ private:
         // 不能在声卡回调里重启自己，拖到下一轮事件
         m_inIdle = true;
         QTimer::singleShot(0, this, [this] {
-            if (!m_inIdle || m_paused)
+            if (!m_inIdle || m_paused || m_deviceSuspended)
                 return;
             m_inIdle = false;
             if (!m_sink || pendingEmpty()) {
@@ -717,7 +776,8 @@ private:
 
     void checkEnd()
     {
-        if (m_finishSent || m_paused || !m_decodeDone || !pendingEmpty())
+        // 锁屏挂起时缓冲会被抽干并进入 Idle，绝不能当成曲终
+        if (m_finishSent || m_paused || m_deviceSuspended || !m_decodeDone || !pendingEmpty())
             return;
         if (!m_sinkStarted) {
             if (m_decodedCursorUs <= 0) {
@@ -780,6 +840,7 @@ private:
     qint64 m_sinkBaseUs = 0;
     qint64 m_lastEmitPos = -1;
     bool m_paused = false;
+    bool m_deviceSuspended = false;
     bool m_decodeDone = false;
     bool m_finishSent = true;
     bool m_ignoreFinish = false;
@@ -822,6 +883,11 @@ AudioEngine::AudioEngine(QObject *parent)
     m_watchdog = new QTimer(this);
     m_watchdog->setInterval(250);
     connect(m_watchdog, &QTimer::timeout, this, &AudioEngine::watchdogTick);
+
+    if (auto *gui = qobject_cast<QGuiApplication *>(QCoreApplication::instance())) {
+        connect(gui, &QGuiApplication::applicationStateChanged,
+                this, &AudioEngine::onAppStateChanged);
+    }
 }
 
 AudioEngine::~AudioEngine()
@@ -1196,11 +1262,13 @@ void AudioEngine::pause()
 {
     if (m_useLocal) {
         m_localPaused = true;
+        setPlaybackKeepAwake(false);
         if (m_local)
             postToLocal(m_local, [local = m_local] { local->pausePlayback(); });
         return;
     }
     m_wantPlay = false;
+    setPlaybackKeepAwake(false);
     m_watchdog->stop();
     if (m_player)
         m_player->pause();
@@ -1247,6 +1315,7 @@ void AudioEngine::stopLocal()
     m_localWanted = false;
     m_localPaused = false;
     ++m_localToken;
+    setPlaybackKeepAwake(false);
     if (!m_local || !m_localThread || !m_localThread->isRunning())
         return;
     QMetaObject::invokeMethod(m_local, [local = m_local] { local->halt(); },
@@ -1258,6 +1327,7 @@ void AudioEngine::stopMediaPlayer()
     m_wantPlay = false;
     m_sourceReady = false;
     ++m_sourceGen;
+    setPlaybackKeepAwake(false);
     if (m_watchdog)
         m_watchdog->stop();
     if (!m_player)
@@ -1272,6 +1342,7 @@ void AudioEngine::onLocalStarted(int token)
 {
     if (token != localToken() || !m_useLocal)
         return;
+    setPlaybackKeepAwake(true);
     emit playingChanged(true);
     emit statusMessage(tr("播放中  ·  音量 %1%").arg(int(qRound(effectiveVolume() * 100))));
 }
@@ -1283,6 +1354,7 @@ void AudioEngine::onLocalPlaying(int token, bool on)
     m_localPaused = !on;
     if (on)
         m_localWanted = true;
+    setPlaybackKeepAwake(on);
     emit playingChanged(on);
 }
 
@@ -1339,10 +1411,75 @@ void AudioEngine::onLocalFailed(int token, const QString &message)
     m_forcePlayer = false;
 }
 
+void AudioEngine::onAppStateChanged(Qt::ApplicationState state)
+{
+    if (state == Qt::ApplicationActive) {
+        if (m_appInactive) {
+            m_appInactive = false;
+            recoverPlaybackAfterWake();
+        }
+        return;
+    }
+    // 锁屏 / 切走时常变为 Inactive；Suspended 较少见
+    if (state == Qt::ApplicationInactive || state == Qt::ApplicationSuspended
+        || state == Qt::ApplicationHidden) {
+        m_appInactive = true;
+        m_stuckTicks = 0;
+        m_watchPos = -1;
+    }
+}
+
+void AudioEngine::recoverPlaybackAfterWake()
+{
+    log(QStringLiteral("recover after wake local=%1 want=%2")
+            .arg(int(m_useLocal))
+            .arg(int(m_wantPlay || m_localWanted)));
+
+    if (m_useLocal && m_local && m_localWanted && !m_localPaused) {
+        postToLocal(m_local, [local = m_local] { local->recoverFromSuspend(); });
+        return;
+    }
+
+    if (!m_wantPlay || !m_player)
+        return;
+
+    m_stuckTicks = 0;
+    m_watchPos = -1;
+    m_watchTries = 0;
+    if (!isPlaying()) {
+        tryPlay();
+        armWatchdog();
+        emit statusMessage(tr("已从锁屏恢复播放"));
+    } else {
+        // 进度可能被卡住，重启看门狗但不立刻判死
+        armWatchdog();
+    }
+}
+
+void AudioEngine::setPlaybackKeepAwake(bool on)
+{
+#ifdef Q_OS_WIN
+    // 播放中请求系统不要轻易睡死音频栈；锁屏仍可能挂起，靠 recover 补救
+    if (on)
+        SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED);
+    else
+        SetThreadExecutionState(ES_CONTINUOUS);
+#else
+    Q_UNUSED(on);
+#endif
+}
+
 void AudioEngine::watchdogTick()
 {
     if (m_useLocal || !m_wantPlay) {
         m_watchdog->stop();
+        return;
+    }
+
+    // 锁屏期间进度常冻结，禁止当成僵尸重载（会把电台/文件弄死）
+    if (m_appInactive
+        || QGuiApplication::applicationState() != Qt::ApplicationActive) {
+        m_stuckTicks = 0;
         return;
     }
 
@@ -1537,6 +1674,7 @@ void AudioEngine::onPlaybackStateChanged(QMediaPlayer::PlaybackState state)
         return;
     const bool playing = (state == QMediaPlayer::PlayingState);
     log(QStringLiteral("playbackState=%1").arg(int(state)));
+    setPlaybackKeepAwake(playing || m_wantPlay);
     if (playing) {
         m_everPlayed = true;
         m_watchdog->stop();

@@ -231,6 +231,17 @@ void MainWindow::detectCityAndLoadRadio()
     if (regionIndex(bootstrap) < 0)
         bootstrap = QStringLiteral("chengdu");
     applyRegion(bootstrap, false);
+    refreshLocalRadio(false);
+}
+
+void MainWindow::refreshLocalRadio(bool forceReload)
+{
+    if (m_geoReply) {
+        m_geoReply->disconnect(this);
+        m_geoReply->abort();
+        m_geoReply->deleteLater();
+        m_geoReply = nullptr;
+    }
 
     // 国内可达的 HTTPS 定位源（ip-api 在国内常超时，不再首选）
     m_geoProviders = {
@@ -239,7 +250,11 @@ void MainWindow::detectCityAndLoadRadio()
     };
     m_geoProviderIndex = 0;
     m_geoActive = true;
-    statusBar()->showMessage(tr("正在识别所在城市以便切换本地电台…"), 4000);
+    m_geoForceReload = forceReload;
+    statusBar()->showMessage(
+        forceReload ? tr("正在重新定位并加载本地电台…")
+                    : tr("正在识别所在城市以便切换本地电台…"),
+        4000);
     tryNextGeoProvider();
 }
 
@@ -254,7 +269,7 @@ void MainWindow::requestGeoLocate(const QUrl &url)
 
     QNetworkRequest req(url);
     req.setHeader(QNetworkRequest::UserAgentHeader,
-                  QStringLiteral("PickupBox/1.2.1 (KK-Files; Qt)"));
+                  QStringLiteral("PickupBox/1.2.2 (KK-Files; Qt)"));
     req.setTransferTimeout(4000);
     m_geoReply = m_geoNam->get(req);
     connect(m_geoReply, &QNetworkReply::finished, this, [this]() {
@@ -286,12 +301,12 @@ void MainWindow::onGeoLocateFinished(QNetworkReply *reply)
         return;
 
     auto parseGeo = [](const QByteArray &raw, QString *city, QString *regionName,
-                       QString *countryCode) -> bool {
+                       QString *countryCode, QString *cityCode) -> bool {
         const QJsonObject root = QJsonDocument::fromJson(raw).object();
         if (root.isEmpty())
             return false;
 
-        // ip9.com.cn: { ret:200, data:{ city, prov, country_code } }
+        // ip9.com.cn: { ret:200, data:{ city, prov, country_code, city_code } }
         if (root.contains(QStringLiteral("data")) && root.value(QStringLiteral("data")).isObject()) {
             const QJsonObject data = root.value(QStringLiteral("data")).toObject();
             if (data.contains(QStringLiteral("location")) && data.value(QStringLiteral("location")).isArray()) {
@@ -303,6 +318,7 @@ void MainWindow::onGeoLocateFinished(QNetworkReply *reply)
                                        : QString();
                     *regionName = loc.at(1).toString().trimmed();
                     *city = loc.at(2).toString().trimmed();
+                    *cityCode = QString();
                     return !city->isEmpty() || !regionName->isEmpty();
                 }
             }
@@ -311,10 +327,11 @@ void MainWindow::onGeoLocateFinished(QNetworkReply *reply)
             if (regionName->isEmpty())
                 *regionName = data.value(QStringLiteral("region")).toString().trimmed();
             *countryCode = data.value(QStringLiteral("country_code")).toString().trimmed();
+            *cityCode = data.value(QStringLiteral("city_code")).toString().trimmed().toLower();
             if (countryCode->isEmpty()
                 && data.value(QStringLiteral("country")).toString().contains(QStringLiteral("中国")))
                 *countryCode = QStringLiteral("CN");
-            return !city->isEmpty() || !regionName->isEmpty();
+            return !city->isEmpty() || !regionName->isEmpty() || !cityCode->isEmpty();
         }
 
         // ip-api 兼容：status/city/regionName/countryCode
@@ -323,6 +340,7 @@ void MainWindow::onGeoLocateFinished(QNetworkReply *reply)
             *city = root.value(QStringLiteral("city")).toString().trimmed();
             *regionName = root.value(QStringLiteral("regionName")).toString().trimmed();
             *countryCode = root.value(QStringLiteral("countryCode")).toString().trimmed();
+            *cityCode = QString();
             return !city->isEmpty() || !regionName->isEmpty();
         }
         return false;
@@ -336,37 +354,73 @@ void MainWindow::onGeoLocateFinished(QNetworkReply *reply)
     QString city;
     QString regionName;
     QString countryCode;
-    if (!parseGeo(reply->readAll(), &city, &regionName, &countryCode)) {
+    QString cityCode;
+    if (!parseGeo(reply->readAll(), &city, &regionName, &countryCode, &cityCode)) {
         tryNextGeoProvider();
         return;
     }
 
-    const QString matched = matchRegionFromGeo(city, regionName, countryCode);
+    const QString matched = matchRegionFromGeo(city, regionName, countryCode, cityCode);
+    const bool forceReload = m_geoForceReload;
     m_geoActive = false;
+    m_geoForceReload = false;
+
+    auto ensureStations = [this](const QString &regionId, bool autoTune) {
+        if (regionIndex(regionId) < 0)
+            return;
+        applyRegion(regionId, autoTune);
+    };
+
     if (matched.isEmpty()) {
         statusBar()->showMessage(
             tr("定位到 %1 %2，暂无对应城市台，保持当前电台").arg(regionName, city), 5000);
+        if (forceReload || m_stations.isEmpty()) {
+            const QString fallback = m_regionId.isEmpty() ? QStringLiteral("chengdu") : m_regionId;
+            ensureStations(fallback, m_radioPower);
+        }
         return;
     }
 
     const int ri = regionIndex(matched);
     const QString label = ri >= 0 ? m_regions[ri].name : matched;
     if (matched == m_regionId) {
-        statusBar()->showMessage(tr("网络定位：当前已是「%1」电台").arg(label), 4000);
+        if (m_stations.isEmpty() || forceReload) {
+            statusBar()->showMessage(tr("网络定位：重新加载「%1」电台…").arg(label), 4000);
+            ensureStations(matched, m_radioPower);
+        } else {
+            statusBar()->showMessage(tr("网络定位：当前已是「%1」电台").arg(label), 4000);
+        }
         return;
     }
 
     statusBar()->showMessage(
         tr("已根据网络定位切换到「%1」电台（%2 %3）").arg(label, regionName, city), 6000);
-    applyRegion(matched, false);
+    ensureStations(matched, m_radioPower);
+}
+
+QString MainWindow::normalizeAdminName(QString name)
+{
+    name = name.simplified();
+    static const QStringList kSuffixes = {
+        QStringLiteral("特别行政区"), QStringLiteral("地区"), QStringLiteral("自治州"),
+        QStringLiteral("盟"), QStringLiteral("市"), QStringLiteral("县"),
+    };
+    for (const QString &suf : kSuffixes) {
+        if (name.size() > suf.size() && name.endsWith(suf)) {
+            name.chop(suf.size());
+            break;
+        }
+    }
+    return name;
 }
 
 QString MainWindow::matchRegionFromGeo(const QString &city, const QString &regionName,
-                                       const QString &countryCode) const
+                                       const QString &countryCode, const QString &cityCode) const
 {
-    const QString cityNorm = city.simplified();
-    const QString regionNorm = regionName.simplified();
+    const QString cityNorm = normalizeAdminName(city);
+    const QString regionNorm = normalizeAdminName(regionName);
     const QString cc = countryCode.toUpper();
+    const QString code = cityCode.trimmed().toLower();
 
     auto containsAny = [](const QString &hay, const QStringList &needles) {
         for (const QString &n : needles) {
@@ -375,6 +429,17 @@ QString MainWindow::matchRegionFromGeo(const QString &city, const QString &regio
         }
         return false;
     };
+
+    // 0) ip9 city_code 直接对应地区 id（最准）
+    if (!code.isEmpty() && regionIndex(code) >= 0)
+        return code;
+    // 常见别名
+    if (code == QLatin1String("xi_an") || code == QLatin1String("xian"))
+        return QStringLiteral("xian");
+    if (code == QLatin1String("harbin") || code == QLatin1String("haerbin"))
+        return QStringLiteral("haerbin");
+    if (code == QLatin1String("hong_kong") || code == QLatin1String("hongkong"))
+        return QStringLiteral("hongkong");
 
     // 1) 城市名精确/包含匹配到地区列表
     for (const RadioRegionDef &r : m_regions) {
@@ -464,12 +529,16 @@ void MainWindow::applyRegion(const QString &regionId, bool autoTune)
     if (ri < 0)
         return;
 
+    const bool cityChanged = (regionId != m_regionId);
     m_regionId = regionId;
     m_lockedStation = -1;
     m_pendingAutoTune = autoTune;
-    m_stations.clear();
-    m_deck->setRadioMarkers({}, {});
-    m_deck->setRadioStationNames({});
+    // 换城时先清台表，避免旧城频率误锁；同城重载则保留直到新数据到达
+    if (cityChanged) {
+        m_stations.clear();
+        m_deck->setRadioMarkers({}, {});
+        m_deck->setRadioStationNames({});
+    }
     m_deck->setRadioRegionName(m_regions[ri].name);
     if (autoTune)
         m_deck->setMediaTab(CassetteDeckWidget::MediaTab::Radio);
@@ -480,6 +549,7 @@ void MainWindow::applyRegion(const QString &regionId, bool autoTune)
         settings.setValue(QStringLiteral("radio/region"), regionId);
     }
 
+    statusBar()->showMessage(tr("正在加载「%1」电台…").arg(m_regions[ri].name));
     m_radioBrowser->fetchRegion(m_regions[ri]);
 }
 
@@ -537,7 +607,7 @@ void MainWindow::onRemoteStationsReady(const QString &regionId, const QVector<Re
 {
     if (regionId != m_regionId)
         return;
-    applyRemoteStations(stations, m_pendingAutoTune);
+    applyRemoteStations(stations, m_pendingAutoTune || m_radioPower);
     m_pendingAutoTune = false;
 }
 
@@ -546,7 +616,10 @@ void MainWindow::onRemoteFetchFailed(const QString &regionId, const QString &mes
     if (regionId != m_regionId)
         return;
     m_pendingAutoTune = false;
-    statusBar()->showMessage(message);
+    statusBar()->showMessage(message, 8000);
+    // 台表仍空且收音机已开：提示用户可手动 CITY 选城重试
+    if (m_stations.isEmpty() && m_radioPower)
+        statusBar()->showMessage(tr("%1 — 可点 CITY 手动选城重试").arg(message), 8000);
 }
 
 int MainWindow::regionIndex(const QString &regionId) const
@@ -826,12 +899,17 @@ void MainWindow::onRadioPower(bool on)
 {
     if (on) {
         setRadioPower(true);
+        // 每次开机重新定位：换城后能切到本地台；台表为空则强制重拉
+        if (!m_geoActive)
+            refreshLocalRadio(m_stations.isEmpty());
         applyFrequency(m_frequency, true);
-        if (m_lockedStation >= 0) {
+        if (m_lockedStation >= 0 && m_lockedStation < m_stations.size()) {
             statusBar()->showMessage(
                 tr("收音机开启  ·  FM %1  ·  %2")
                     .arg(m_stations[m_lockedStation].freq, 0, 'f', 1)
                     .arg(m_stations[m_lockedStation].name));
+        } else if (m_stations.isEmpty()) {
+            statusBar()->showMessage(tr("收音机开启  ·  正在加载本地电台…"));
         } else {
             statusBar()->showMessage(tr("收音机开启  ·  请调谐到电台"));
         }

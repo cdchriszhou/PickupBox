@@ -65,10 +65,13 @@ private:
     void loadLyricsForCurrent();
     void initRegions();
     void detectCityAndLoadRadio();
+    void refreshLocalRadio(bool forceReload);
     void requestGeoLocate(const QUrl &url);
     void tryNextGeoProvider();
     QString matchRegionFromGeo(const QString &city, const QString &regionName,
-                               const QString &countryCode) const;
+                               const QString &countryCode,
+                               const QString &cityCode = QString()) const;
+    static QString normalizeAdminName(QString name);
     void applyRegion(const QString &regionId, bool autoTune);
     void applyRemoteStations(const QVector<RemoteStation> &remote, bool autoTune);
     void applyFrequency(float mhz, bool autoPlay);
@@ -89,6 +92,7 @@ private:
     QStringList m_geoProviders;
     int m_geoProviderIndex = 0;
     bool m_geoActive = false;
+    bool m_geoForceReload = false;
     qint64 m_duration = 0;
     QStringList m_playlist;
     int m_playlistIndex = -1;

@@ -89,15 +89,13 @@ QVector<RadioRegionDef> RadioBrowser::defaultRegions()
     };
 }
 
-QUrl RadioBrowser::pickApiBase()
+QStringList RadioBrowser::apiBases()
 {
-    // radio-browser 官方镜像；失败时由上层重试其它
-    static const char *kBases[] = {
-        "https://de1.api.radio-browser.info",
-        "https://nl1.api.radio-browser.info",
-        "https://at1.api.radio-browser.info",
+    return {
+        QStringLiteral("https://de1.api.radio-browser.info"),
+        QStringLiteral("https://fi1.api.radio-browser.info"),
+        QStringLiteral("https://at1.api.radio-browser.info"),
     };
-    return QUrl(QString::fromLatin1(kBases[0]));
 }
 
 void RadioBrowser::fetchRegion(const RadioRegionDef &region)
@@ -107,18 +105,27 @@ void RadioBrowser::fetchRegion(const RadioRegionDef &region)
         return;
     }
 
+    ++m_generation;
     m_activeRegionId = region.id;
+    m_activeRegion = region;
+    m_mirrorIndex = 0;
     m_accum.clear();
+    m_hadNetworkError = false;
     m_pending = region.nameQueries.size();
     emit fetchStarted(region.name);
 
     for (const QString &q : region.nameQueries)
-        startQuery(region.id, q, region.countryCode);
+        startQuery(region.id, q, region.countryCode, m_mirrorIndex, m_generation);
 }
 
-void RadioBrowser::startQuery(const QString &regionId, const QString &nameQuery, const QString &countryCode)
+void RadioBrowser::startQuery(const QString &regionId, const QString &nameQuery,
+                              const QString &countryCode, int mirrorIndex, int generation)
 {
-    QUrl url = pickApiBase();
+    const QStringList bases = apiBases();
+    if (mirrorIndex < 0 || mirrorIndex >= bases.size())
+        return;
+
+    QUrl url(bases.at(mirrorIndex));
     url.setPath(QStringLiteral("/json/stations/search"));
     QUrlQuery query;
     query.addQueryItem(QStringLiteral("name"), nameQuery);
@@ -131,31 +138,62 @@ void RadioBrowser::startQuery(const QString &regionId, const QString &nameQuery,
     url.setQuery(query);
 
     QNetworkRequest req(url);
-    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("ShiyinBox/1.0 (Qt6; hi-fi radio)"));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("ShiyinBox/1.2.2 (Qt6; hi-fi radio)"));
     req.setRawHeader("Accept", "application/json");
-    req.setTransferTimeout(20000);
+    req.setTransferTimeout(15000);
 
     QNetworkReply *reply = m_nam->get(req);
     reply->setProperty("regionId", regionId);
+    reply->setProperty("nameQuery", nameQuery);
+    reply->setProperty("countryCode", countryCode);
+    reply->setProperty("mirror", mirrorIndex);
+    reply->setProperty("generation", generation);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() { onReplyFinished(reply); });
+}
+
+void RadioBrowser::retryRegionOnNextMirror()
+{
+    const QStringList bases = apiBases();
+    if (m_mirrorIndex + 1 >= bases.size())
+        return;
+
+    ++m_mirrorIndex;
+    m_accum.clear();
+    m_hadNetworkError = false;
+    m_pending = m_activeRegion.nameQueries.size();
+    emit fetchStarted(tr("%1（镜像 %2）").arg(m_activeRegion.name).arg(m_mirrorIndex + 1));
+    for (const QString &q : m_activeRegion.nameQueries)
+        startQuery(m_activeRegion.id, q, m_activeRegion.countryCode, m_mirrorIndex, m_generation);
 }
 
 void RadioBrowser::onReplyFinished(QNetworkReply *reply)
 {
     reply->deleteLater();
     const QString regionId = reply->property("regionId").toString();
-    if (regionId != m_activeRegionId) {
-        // 过期请求
-        return;
-    }
+    const int generation = reply->property("generation").toInt();
+    if (generation != m_generation || regionId != m_activeRegionId)
+        return; // 过期请求（已换城市或已重试镜像）
 
     if (reply->error() != QNetworkReply::NoError) {
+        m_hadNetworkError = true;
+        // 单条查询失败时立刻换下一镜像重试该关键字
+        const int mirror = reply->property("mirror").toInt();
+        const QStringList bases = apiBases();
+        if (mirror + 1 < bases.size()) {
+            startQuery(regionId,
+                       reply->property("nameQuery").toString(),
+                       reply->property("countryCode").toString(),
+                       mirror + 1,
+                       generation);
+            return; // pending 不变，由新请求承接
+        }
+
         --m_pending;
         if (m_pending <= 0) {
             if (m_accum.isEmpty())
                 emit fetchFailed(regionId, tr("加载电台失败：%1").arg(reply->errorString()));
             else
-                finishIfDone(regionId);
+                finishIfDone(regionId, generation);
         }
         return;
     }
@@ -175,12 +213,20 @@ void RadioBrowser::onReplyFinished(QNetworkReply *reply)
 
     --m_pending;
     if (m_pending <= 0)
-        finishIfDone(regionId);
+        finishIfDone(regionId, generation);
 }
 
-void RadioBrowser::finishIfDone(const QString &regionId)
+void RadioBrowser::finishIfDone(const QString &regionId, int generation)
 {
+    if (generation != m_generation || regionId != m_activeRegionId)
+        return;
+
     if (m_accum.isEmpty()) {
+        // 当前镜像整批为空且曾有网络错误 → 换镜像整区重试一次
+        if (m_hadNetworkError && m_mirrorIndex + 1 < apiBases().size()) {
+            retryRegionOnNextMirror();
+            return;
+        }
         emit fetchFailed(regionId, tr("该地区暂无可用电台流（可换城市或检查网络）"));
         return;
     }
@@ -189,13 +235,11 @@ void RadioBrowser::finishIfDone(const QString &regionId)
               [](const RemoteStation &a, const RemoteStation &b) {
                   if (a.clickCount != b.clickCount)
                       return a.clickCount > b.clickCount;
-                  // 优先非 HLS，便于兼容
                   if (a.hls != b.hls)
                       return !a.hls && b.hls;
                   return a.name < b.name;
               });
 
-    // 刻度容量：约 0.25 MHz 一档，最多 ~80 台
     constexpr int kMax = 80;
     if (m_accum.size() > kMax)
         m_accum.resize(kMax);

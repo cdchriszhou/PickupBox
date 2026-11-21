@@ -65,6 +65,7 @@ private slots:
     void onMediaStatusChanged(QMediaPlayer::MediaStatus status);
     void onDurationChanged(qint64 dur);
     void watchdogTick();
+    void onAppStateChanged(Qt::ApplicationState state);
 
 private:
     void applyOutputGain();
@@ -80,6 +81,8 @@ private:
     void log(const QString &line) const;
     void stopLocal();
     void stopMediaPlayer();
+    void recoverPlaybackAfterWake();
+    void setPlaybackKeepAwake(bool on);
     int localToken() const { return m_localToken.load(std::memory_order_acquire); }
     void onLocalStarted(int token);
     void onLocalPlaying(int token, bool on);
@@ -106,6 +109,7 @@ private:
     bool m_wantPlay = false;
     bool m_everPlayed = false;
     bool m_sourceReady = false; // setSource 完成前忽略 status/Loaded 误触发
+    bool m_appInactive = false; // 锁屏/切后台，避免看门狗误杀
     int m_sourceGen = 0;
     std::atomic<int> m_localToken{0};
     qint64 m_localPos = 0;
